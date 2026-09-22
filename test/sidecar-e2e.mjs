@@ -79,6 +79,16 @@ await new Promise((r) => setTimeout(r, 2500));
 st = await (await fetch(`${base}/state`, { headers: H })).json();
 assert(st.turns.some((t) => t.turnId === 3), `补全后的残行被正确消费且只计一次（实际: ${JSON.stringify(st.turns.map((t) => [t.turnId, t.agentId, t.done]))}）`);
 
+// 进行中回合：只有 started 没有 ended → 出现在 active，且不进已完成列表
+// （用真实当前时间，走 24h 新鲜度过滤）
+const liveT = Date.now();
+writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.concat(batch2).join("\n") + "\n" + fullLine3 + "\n" + ev("turn.started", { time: liveT, turnId: 4, agentId: "main", prompt: "进行中" }, 12) + "\n" + ev("turn.step.completed", { time: liveT + 500, turnId: 4, agentId: "main", usage: { inputOther: 5, output: 6, inputCacheRead: 0, inputCacheCreation: 0 }, llmServerDecodeMs: 400 }, 13) + "\n");
+await new Promise((r) => setTimeout(r, 2500));
+st = await (await fetch(`${base}/state`, { headers: H })).json();
+const act = (st.active ?? []).find((t) => t.turnId === 4);
+assert(!!act && act.out === 6 && act.elapsedMs > 0, "进行中回合出现在 active（实时统计）");
+assert(!st.turns.some((t) => t.turnId === 4), "未完成回合不进已完成列表");
+
 const anon = await fetch(`${base}/state`);
 assert(anon.status === 401, "无 token 401");
 

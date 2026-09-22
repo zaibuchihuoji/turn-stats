@@ -204,14 +204,23 @@ function scanEvents() {
 
 function statePayload() {
   scanEvents();
+  const now = Date.now();
   const list = [...turns.values()].filter((t) => t.done)
     .sort((a, b) => b.endT - a.endT)
     .slice(0, MAX_TURNS);
+  // 进行中的回合（面板实时统计用）
+  const active = [...turns.values()].filter((t) => !t.done && now - t.startT < 24 * 3600_000)
+    .sort((a, b) => b.startT - a.startT)
+    .map((t) => ({
+      sessionId: t.sessionId, turnId: t.turnId, startT: t.startT,
+      elapsedMs: now - t.startT, in: t.in, out: t.out,
+      cacheRead: t.cacheRead, cacheCreation: t.cacheCreation,
+    }));
   if (process.env.TURN_STATS_DEBUG) {
     console.error(`[state] turns=${list.length} turnIds=${JSON.stringify(list.map((t) => t.turnId))} offsets=${JSON.stringify([...fileOffsets])} subdir=${JSON.stringify([...subBuckets.keys()].slice(0, 5))}`);
   }
   return {
-    ok: true, version: VERSION, turns: list,
+    ok: true, version: VERSION, turns: list, active,
     filesScanned, lastWorkspace,
   };
 }
