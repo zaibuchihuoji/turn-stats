@@ -115,20 +115,25 @@
     const ready = records
       .filter((r) => (!sid || r.t.sessionId === sid) && now - r.t.endT >= RENDER_SETTLE_MS)
       .sort((a, b) => b.t.endT - a.t.endT)[0];
-    if (!ready) return;
     const host = targetHost();
     if (!host) return;
     ensureStyle();
     let line = host.parent.querySelector(":scope > .ts-line");
-    if (!line) {
-      line = buildLine(ready.t);
-      if (host.composerRoot) host.parent.insertBefore(line, host.composerRoot);
-      else host.parent.appendChild(line);
-      return;
+    // 统计行后面出现了新的用户回合 = 用户已发下一条消息，旧统计失效，移除；
+    // （否则统计行会被夹在旧回答与新消息之间，看起来像挂在了用户消息上）
+    if (line) {
+      const next = line.nextElementSibling;
+      if (next && (next.matches(".u-turn, [data-turn-id]") || next.querySelector?.(".u-turn"))) {
+        line.remove();
+        line = null;
+      }
     }
-    if (line.dataset.tsKey !== ready.key) {
-      line.replaceWith(buildLine(ready.t));
-    }
+    if (!ready) return;
+    if (line && line.dataset.tsKey === ready.key) return;
+    if (line) line.remove();
+    const fresh = buildLine(ready.t);
+    if (host.composerRoot) host.parent.insertBefore(fresh, host.composerRoot);
+    else host.parent.appendChild(fresh);
   }
 
   // -------------------------------------------------------------------------
@@ -187,7 +192,7 @@
     if (speed > 0) put("生成", `${Math.round(speed)} tok/s`);
     line.title = [
       `输入合计 ${t.in.toLocaleString()} tok = 新增 ${fmtTokens(t.in - t.cacheRead - t.cacheCreation)} + 缓存读 ${t.cacheRead.toLocaleString()} + 缓存创建 ${t.cacheCreation.toLocaleString()}`,
-      `输出 ${t.out.toLocaleString()} tok · 纯生成 ${((t.decodeMs ?? 0) / 1000).toFixed(1)} 秒（速度不含思考与工具等待）`,
+      `输出 ${t.out.toLocaleString()} tok · 纯答案解码 ${((t.decodeMs ?? 0) / 1000).toFixed(1)} 秒（速度不含思考，Kimi 事件不含思考 token 计数）`,
       t.firstTokenMs ? `首字延迟 ${(t.firstTokenMs / 1000).toFixed(1)} 秒` : "",
       `结束原因 ${t.reason || "completed"} · 会话 ${t.sessionId.slice(0, 26)}… · 回合 #${t.turnId}`,
     ].filter(Boolean).join("\n");
