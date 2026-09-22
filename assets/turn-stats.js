@@ -18,6 +18,7 @@
   const CONFIG_URL = "/assets/turn-stats.config.json";
   const POLL_MS = 2000;
   const ATTACH_RETRY_MS = 2000;
+  const RENDER_SETTLE_MS = 2500;   // turn.ended 后等流式打字动画收尾再出统计行
   const ATTACH_TTL = 10 * 60000;
   const FETCH_TIMEOUT = 6000;
 
@@ -85,12 +86,49 @@
   }
 
   function visibleRecords() {
-    // 只渲染当前打开会话的回合——sidecar 聚合的是所有会话，不过滤就会把别的
-    // 会话（甚至重启前遗留的）统计混进当前聊天，正是"数据不对版"的一种来源。
-    // URL 无会话 id（刚新建的聊天）时退化为只显示最新一条。
+    // 只统计当前打开会话的回合——sidecar 聚合的是所有会话，不过滤就会把别的
+    // 会话（甚至重启前遗留的）统计混进当前聊天
     const sid = currentSessionId();
     const mine = records.filter((r) => !sid || r.t.sessionId === sid);
     return mine.length ? mine : records.slice(-1);
+  }
+
+  // 统计行宿主：最后一个用户回合（.u-turn）的父容器 = 消息区末尾。
+  // 注意：整张消息区里只有用户回合带 data-turn-id，助手回复没有独立锚点，
+  // 所以挂在容器末尾（最后一轮回答下方）；composer 若在同容器则插到它前面
+  function targetHost() {
+    const uTurns = [...document.querySelectorAll(".u-turn[data-turn-id]")];
+    const last = uTurns[uTurns.length - 1];
+    if (!last) return null;
+    const parent = last.parentElement;
+    if (!parent) return null;
+    const pm = parent.querySelector(".ProseMirror");
+    const composerRoot = pm ? (pm.closest('[class*="composer"]') ?? pm.parentElement) : null;
+    return { parent, composerRoot };
+  }
+
+  function attachStats() {
+    const sid = currentSessionId();
+    const now = Date.now();
+    // 最新完成的一轮回合，且流式展示已收尾（RENDER_SETTLE_MS）——
+    // turn.ended 时客户端打字动画常常还在放，过早插入会"消息没显示完就统计了"
+    const ready = records
+      .filter((r) => (!sid || r.t.sessionId === sid) && now - r.t.endT >= RENDER_SETTLE_MS)
+      .sort((a, b) => b.t.endT - a.t.endT)[0];
+    if (!ready) return;
+    const host = targetHost();
+    if (!host) return;
+    ensureStyle();
+    let line = host.parent.querySelector(":scope > .ts-line");
+    if (!line) {
+      line = buildLine(ready.t);
+      if (host.composerRoot) host.parent.insertBefore(line, host.composerRoot);
+      else host.parent.appendChild(line);
+      return;
+    }
+    if (line.dataset.tsKey !== ready.key) {
+      line.replaceWith(buildLine(ready.t));
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -156,12 +194,6 @@
     return line;
   }
 
-  function turnCandidates() {
-    // 排除 cron 通知元素与会话目录（conversation-toc 的条目也可能带 data-turn-id）
-    return [...document.querySelectorAll("[data-turn-id]")]
-      .filter((el) => el.dataset.turnId && !/cron/i.test(el.className) && !el.closest(".conversation-toc"));
-  }
-
   function ensureStyle() {
     if (document.getElementById("turn-stats-style")) return;
     try {
@@ -172,32 +204,6 @@
     } catch {}
   }
 
-  function attachStats() {
-    const vis = visibleRecords();
-    if (!vis.length) return;
-    ensureStyle();
-    const turns = turnCandidates();
-    if (!turns.length) return;
-    // vis 按结束时间升序；最新记录配最后一轮，依次向前；回合元素不足则跳过最旧。
-    // 不做"已挂载就跳过"：宿主 SPA 重渲染会抹掉统计行，按存在性幂等重挂
-    for (let i = vis.length - 1; i >= 0; i--) {
-      const r = vis[i];
-      const idx = turns.length - 1 - (vis.length - 1 - i);
-      if (idx < 0) break;
-      const turnEl = turns[idx];
-      let already = false, occupied = false;
-      for (const el of turnEl.querySelectorAll(".ts-line")) {
-        occupied = true;
-        if (el.dataset.tsKey === r.key) already = true;
-      }
-      if (already || occupied) continue;
-      try {
-        turnEl.appendChild(buildLine(r.t));
-      } catch (err) {
-        diag.lastAttachError = String((err && err.stack) || err).slice(0, 200);
-      }
-    }
-  }
 
   // -------------------------------------------------------------------------
   // 启动 + 诊断（window.__turnStatsState）
@@ -220,7 +226,7 @@
     diag.polled++;
     diag.turnsKnown = rendered.size;
     diag.attachedCount = document.querySelectorAll(".ts-line").length;
-    diag.lastTurnElements = turnCandidates().length;
+    diag.lastTurnElements = document.querySelectorAll(".u-turn[data-turn-id]").length;
     try {
       window.__turnStatsState = { ...diag, loadError,
         lastTurns: records.slice(-3).map((r) => ({ in: r.t.in, out: r.t.out, ms: r.t.durationMs, sid: r.t.sessionId.slice(0, 14) })) };
