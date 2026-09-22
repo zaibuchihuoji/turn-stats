@@ -1,0 +1,16 @@
+# 本地研究/临时文件
+.mimosa/
+.research/
+*.log
+
+# 系统文件
+Thumbs.db
+.DS_Store
+
+# 依赖（本插件零依赖，防御性排除）
+node_modules/
+
+# 自更新本地状态
+.update-state.json
+.update-new/
+.update-old/
