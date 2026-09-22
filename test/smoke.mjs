@@ -21,13 +21,16 @@ writeFileSync(join(dist, "index.html"), html0);
 mkdirSync(join(dist, "assets"), { recursive: true });
 writeFileSync(join(dist, "assets", "usage-union.js"), "/* placeholder */");
 
+const manifest = JSON.parse(readFileSync(join(HERE, "..", "kimi.plugin.json"), "utf8"));
+const expectVer = `turn-stats@${manifest.version}`;
+
 // 1. 首次注入
 let r = cli(["--status", "--dist", dist]);
 assert(r.status === 0, "首次注入成功");
 const html1 = readFileSync(join(dist, "index.html"), "utf8");
 assert(html1.includes("turn-stats.js") && html1.includes("usage-union.js"), "turn-stats 注入且 usage-union 保留");
 const rt = readFileSync(join(dist, "assets", "turn-stats.js"), "utf8");
-assert(rt.startsWith("/* turn-stats@0.1.0 */"), "runtime 带版本头");
+assert(rt.startsWith(`/* ${expectVer} */`), `runtime 带版本头（${manifest.version}）`);
 const bak = readFileSync(join(dist, "index.html.turn-stats.bak"), "utf8");
 assert(bak.includes("usage-union.js") && !bak.includes("turn-stats.js"), "备份=干净基线（保留其他插件、无自己）");
 
@@ -51,8 +54,7 @@ assert(html2.includes("usage-union.js"), "卸载不影响其他插件注入");
 assert(!existsSync(join(dist, "assets", "turn-stats.js")), "runtime 文件已删");
 assert(!existsSync(join(dist, "index.html.turn-stats.bak")), "备份文件已清");
 
-// 5. 版本号来自 manifest
-const manifest = JSON.parse(readFileSync(join(HERE, "..", "kimi.plugin.json"), "utf8"));
-assert(rt.includes(`turn-stats@${manifest.version}`), `runtime 版本与 manifest 一致（${manifest.version}）`);
+// 5. 版本号来自 manifest（版本头断言见第 1 步）
+assert(rt.includes(expectVer), "runtime 版本与 manifest 一致");
 
 console.log(`--- turn-stats 冒烟 ${pass} 项全部通过 ---`);

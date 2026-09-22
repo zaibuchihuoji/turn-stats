@@ -92,13 +92,14 @@
       if (runningIds.has(id)) continue;
       watchers.delete(id);
       if (!w.wasBusy) continue;
-      finalizeTurn(id, w);
+      finalizeTurn(id, w, Date.now());
     }
   }
 
-  async function finalizeTurn(sessionId, w) {
+  async function finalizeTurn(sessionId, w, endDetectedT) {
     const key = `${sessionId}#${Date.now()}`;
-    // 延迟取终值：流式收尾的 usage 常在状态翻转后一瞬才落盘
+    // 延迟取终值：流式收尾的 usage 常在状态翻转后一瞬才落盘。
+    // 耗时按"检测到结束"的时刻算，不含这段结算延迟
     setTimeout(async () => {
       let endUsage = w.lastUsage;
       try {
@@ -107,7 +108,7 @@
         if (s?.usage) endUsage = s.usage;
       } catch {}
       records.push({
-        key, sessionId, title: w.title, startT: w.startT, endT: Date.now(),
+        key, sessionId, title: w.title, startT: w.startT, endT: endDetectedT,
         delta: deltaUsage(w.startUsage, endUsage), joinedMid: w.joinedMid, attached: null,
       });
       if (records.length > 40) records.shift();
@@ -193,14 +194,16 @@
     const turns = turnCandidates();
     if (!turns.length) return;
     const now = Date.now();
-    // 从新到旧尝试挂载；同回合重复挂载跳过
+    // 记录按时间升序、回合元素按 DOM 序升序：最新记录配最后一轮，依次向前；
+    // 回合元素比记录少时跳过最旧的记录
     for (let i = records.length - 1; i >= 0; i--) {
       const r = records[i];
       if (r.attached && now - r.endT > ATTACH_TTL) continue;
-      const turnEl = turns[Math.min(i, turns.length - 1)];
-      if (!turnEl) continue;
+      const idx = turns.length - 1 - (records.length - 1 - i);
+      if (idx < 0) break;
+      const turnEl = turns[idx];
       if (turnEl.querySelector(`.ts-line[data-ts-key="${CSS.escape(r.key)}"]`)) { r.attached = now; continue; }
-      // 该回合元素已挂了更新的统计行，旧的不再补挂
+      // 该回合元素已挂了统计行（含其他记录），不再叠加
       if (turnEl.querySelector(".ts-line")) continue;
       try {
         turnEl.appendChild(buildLine(r));
