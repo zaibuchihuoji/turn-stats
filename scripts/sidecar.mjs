@@ -1,0 +1,252 @@
+/**
+ * turn-stats sidecar
+ *
+ * 渲染进程没有 fs 权限，而每回合的 token 用量在本地 server 落盘的事件日志里
+ * （~/.kimi-code/server/events/session_<id>.jsonl，事件：turn.started /
+ * turn.step.completed / turn.ended）。本服务由 SessionStart hook 拉起：
+ *   - 监听事件目录（2s 轮询增量），聚合出每个回合的 token 消耗与时长
+ *   - 通过 HTTP 把已完成回合喂给注入的统计脚本
+ * 仅绑定 127.0.0.1，Bearer token 写入 desktop-dist/assets/turn-stats.config.json。
+ * 自愈：config 被新实例改写（指向别的端口）→ 让位退出；config 连续缺失 → 退出。
+ *
+ * 端点：
+ *   GET /ping     → {ok, service, version, port}
+ *   GET /state    → {ok, turns:[...], version}
+ *   POST /shutdown
+ */
+
+import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
+import { writeFileSync, existsSync, readFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(PLUGIN_ROOT, "kimi.plugin.json"), "utf8")).version ?? "0.0.0";
+  } catch { return "0.0.0"; }
+})();
+const ASSETS_DIR = process.env.TURN_STATS_ASSETS ?? null;
+const CONFIG_NAME = "turn-stats.config.json";
+const PORT_RANGE = [39501, 39511];
+const EVENTS_DIR = join(
+  process.env.KIMI_CODE_HOME ?? join(process.env.USERPROFILE ?? process.env.HOME ?? ".", ".kimi-code"),
+  "server", "events",
+);
+const MAX_TURNS = 40;
+
+let TOKEN = randomBytes(16).toString("hex");
+let PORT = 0;
+let lastWorkspace = null;
+
+function writeAtomic(fp, data) {
+  const tmp = `${fp}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    writeFileSync(tmp, data, "utf8");
+    renameSync(tmp, fp);
+  } catch {
+    try { unlinkSync(tmp); } catch {}
+    writeFileSync(fp, data, "utf8");
+  }
+}
+
+function writeClientConfig() {
+  if (!ASSETS_DIR) return;
+  try {
+    mkdirSync(ASSETS_DIR, { recursive: true });
+    writeAtomic(join(ASSETS_DIR, CONFIG_NAME), JSON.stringify({
+      version: VERSION, port: PORT, token: TOKEN, pid: process.pid,
+    }, null, 2) + "\n");
+  } catch {}
+}
+
+// --- 事件日志聚合 -------------------------------------------------------------
+// turns: Map<`${sessionId}|${turnId}`, turn>
+const turns = new Map();
+const fileOffsets = new Map();   // 文件路径 -> 已读字节
+let filesScanned = 0;
+
+function ensureTurn(sessionId, turnId, time) {
+  const key = `${sessionId}|${turnId}`;
+  if (!turns.has(key)) {
+    turns.set(key, {
+      sessionId, turnId,
+      startT: Number(time) || Date.now(),
+      endT: 0, durationMs: 0, reason: "",
+      in: 0, out: 0, cacheRead: 0, cacheCreation: 0,
+      done: false,
+    });
+    // 淘汰最旧的已完成回合
+    const done = [...turns.entries()].filter(([, t]) => t.done);
+    if (done.length > MAX_TURNS) {
+      done.sort((a, b) => a[1].endT - b[1].endT);
+      for (let i = 0; i < done.length - MAX_TURNS; i++) turns.delete(done[i][0]);
+    }
+  }
+  return turns.get(key);
+}
+
+function processLine(line) {
+  if (!line.includes("turn.")) return;
+  let j;
+  try { j = JSON.parse(line); } catch { return; }
+  const env = j.envelope ?? j;
+  const type = env.type ?? "";
+  const p = env.payload ?? {};
+  const sessionId = env.session_id ?? "";
+  const turnId = p.turnId;
+  if (!sessionId || turnId === undefined) return;
+  const t = ensureTurn(sessionId, turnId, p.time);
+  if (type === "turn.started") {
+    t.startT = Number(p.time) || t.startT;
+  } else if (type === "turn.step.completed") {
+    const u = p.usage ?? {};
+    t.in += Number(u.inputOther ?? 0) + Number(u.inputCacheRead ?? 0) + Number(u.inputCacheCreation ?? 0);
+    t.out += Number(u.output ?? 0);
+    t.cacheRead += Number(u.inputCacheRead ?? 0);
+    t.cacheCreation += Number(u.inputCacheCreation ?? 0);
+  } else if (type === "turn.ended") {
+    t.endT = Number(p.time) || Date.now();
+    t.durationMs = Number(p.durationMs ?? 0) || Math.max(0, t.endT - t.startT);
+    t.reason = p.reason ?? "completed";
+    t.done = true;
+  }
+}
+
+function scanEvents() {
+  let names = [];
+  try { names = readdirSync(EVENTS_DIR).filter((f) => f.endsWith(".jsonl")); } catch { return; }
+  filesScanned = names.length;
+  for (const name of names) {
+    const fp = join(EVENTS_DIR, name);
+    let size = 0;
+    try { size = statSync(fp).size; } catch { continue; }
+    const off = fileOffsets.get(fp) ?? 0;
+    if (size <= off) continue;
+    // 首次见到该文件：只读末尾 256KB（历史回合太多，回满会撑爆内存）
+    const from = off === 0 ? Math.max(0, size - 256 * 1024) : off;
+    let text = "";
+    try {
+      const fd = openSync(fp, "r");
+      const len = size - from;
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, from);
+      closeSync(fd);
+      text = buf.toString("utf8");
+    } catch { continue; }
+    fileOffsets.set(fp, size);
+    const lines = text.split(/\r?\n/);
+    if (off === 0 && from > 0) lines.shift();   // 丢弃被截断的半行
+    for (const line of lines) processLine(line);
+  }
+}
+
+function statePayload() {
+  scanEvents();
+  const list = [...turns.values()].filter((t) => t.done)
+    .sort((a, b) => b.endT - a.endT)
+    .slice(0, MAX_TURNS);
+  return {
+    ok: true, version: VERSION, turns: list,
+    filesScanned, lastWorkspace,
+  };
+}
+
+// --- HTTP ------------------------------------------------------------------------
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "authorization,content-type",
+  "Access-Control-Max-Age": "86400",
+};
+function json(res, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", ...CORS });
+  res.end(JSON.stringify(obj));
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on("data", (c) => { size += c.length; if (size > 1e5) { reject(new Error("body too large")); req.destroy(); return; } chunks.push(c); });
+    req.on("end", () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}); } catch { reject(new Error("JSON 解析失败")); } });
+    req.on("error", reject);
+  });
+}
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", "http://127.0.0.1");
+  if (req.method === "OPTIONS") { res.writeHead(204, CORS); res.end(); return; }
+  if (url.pathname === "/ping") {
+    return json(res, 200, { ok: true, service: "turn-stats", version: VERSION, port: PORT });
+  }
+  const auth = req.headers.authorization ?? "";
+  if (auth !== `Bearer ${TOKEN}`) return json(res, 401, { ok: false, error: "未授权" });
+  try {
+    if (req.method === "GET" && url.pathname === "/state") {
+      return json(res, 200, statePayload());
+    }
+    if (req.method === "POST" && url.pathname === "/touch") {
+      const b = await readBody(req);
+      if (b?.workspace) lastWorkspace = String(b.workspace);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && url.pathname === "/shutdown") {
+      json(res, 200, { ok: true });
+      setTimeout(() => process.exit(0), 100);
+      return;
+    }
+    json(res, 404, { ok: false, error: "not found" });
+  } catch (err) {
+    json(res, 400, { ok: false, error: String(err?.message ?? err) });
+  }
+});
+
+server.on("error", (e) => {
+  if (e?.code === "EADDRINUSE" && tryingPort < PORT_RANGE[1]) listen(tryingPort + 1);
+  else process.exit(1);
+});
+
+let tryingPort = 0;
+function listen(port) {
+  tryingPort = port;
+  server.listen(port, "127.0.0.1", () => {
+    PORT = port;
+    writeClientConfig();
+    let configMisses = 0;
+    setInterval(() => {
+      if (!ASSETS_DIR) return;
+      try {
+        const c = JSON.parse(readFileSync(join(ASSETS_DIR, CONFIG_NAME), "utf8"));
+        configMisses = 0;
+        if (c.port && c.port !== PORT) process.exit(0);
+      } catch {
+        if (++configMisses >= 2) process.exit(0);
+      }
+    }, 30_000).unref();
+  });
+}
+
+// --- 启动 ------------------------------------------------------------------------
+// 复用同版本旧实例：端口上有活着的服务且 config 仍指向它 → 直接退出
+async function pickExisting() {
+  for (let p = PORT_RANGE[0]; p < PORT_RANGE[1]; p++) {
+    try {
+      const j = await (await fetch(`http://127.0.0.1:${p}/ping`, { signal: AbortSignal.timeout(400) })).json();
+      if (j?.ok && j?.service === "turn-stats" && j?.version === VERSION) {
+        const cfgPath = ASSETS_DIR ? join(ASSETS_DIR, CONFIG_NAME) : null;
+        if (cfgPath && existsSync(cfgPath)) {
+          const c = JSON.parse(readFileSync(cfgPath, "utf8"));
+          if (c.port === p) return true;
+        }
+      }
+    } catch {}
+  }
+  return false;
+}
+
+if (await pickExisting()) {
+  process.exit(0);
+}
+scanEvents();
+listen(PORT_RANGE[0]);

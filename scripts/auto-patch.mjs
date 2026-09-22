@@ -14,6 +14,8 @@
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as su from "./self-update.mjs";
 
@@ -119,13 +121,63 @@ function injectUI(dist) {
   return true;
 }
 
+// --- sidecar ------------------------------------------------------------------------
+const CONFIG_NAME = "turn-stats.config.json";
+
+async function ping(port) {
+  try {
+    const j = await (await fetch(`http://127.0.0.1:${port}/ping`, { signal: AbortSignal.timeout(400) })).json();
+    return j?.service === "turn-stats" ? j : null;
+  } catch { return null; }
+}
+
+async function ensureSidecar(dist) {
+  // 并行探测端口段：同版本已在跑直接复用；版本不一致继续拉起，旧实例自愈退出
+  const ports = [];
+  for (let p = 39501; p < 39511; p++) ports.push(p);
+  const hits = await Promise.all(ports.map(ping));
+  for (let i = 0; i < ports.length; i++) {
+    if (hits[i]?.version === VERSION) return { running: true, port: ports[i], spawned: false };
+  }
+  if (has("--no-spawn")) return { running: false, spawned: false };
+  const assetsDir = join(dist, "assets");
+  const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", "sidecar.mjs")], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, TURN_STATS_ASSETS: assetsDir },
+    windowsHide: true,
+  });
+  child.unref();
+  // 等 sidecar 绑定端口并写好 config
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 150));
+    try {
+      const c = JSON.parse(readFileSync(join(assetsDir, CONFIG_NAME), "utf8"));
+      if (c.port && await ping(c.port)) return { running: true, port: c.port, spawned: true };
+    } catch {}
+  }
+  return { running: false, spawned: true };
+}
+
+async function shutdownSidecar(dist) {
+  try {
+    const c = JSON.parse(readFileSync(join(dist, "assets", CONFIG_NAME), "utf8"));
+    if (c.port && c.token) {
+      await fetch(`http://127.0.0.1:${c.port}/shutdown`, {
+        method: "POST", headers: { Authorization: `Bearer ${c.token}` }, signal: AbortSignal.timeout(800),
+      }).catch(() => {});
+    }
+  } catch {}
+}
+
 // --- 主流程 -----------------------------------------------------------------------
 async function main() {
   if (has("--uninstall")) {
     const dist = findDistDir();
     if (!dist) { console.error("未找到 desktop-dist"); process.exit(1); }
+    await shutdownSidecar(dist);
     uninstallDist(dist);
-    console.log(`✓ 已还原 ${dist}`);
+    console.log(`✓ 已还原 ${dist}，统计服务已停止`);
     return;
   }
 
@@ -135,6 +187,10 @@ async function main() {
   let injected = false;
   try { injected = injectUI(dist); } catch (e) { say(`turn-stats: 注入失败 ${e?.message ?? e}`); }
   say(`turn-stats: ${injected ? `已注入 @${VERSION} → ${dist}（重启应用生效）` : `已是最新 (@${VERSION})`}`);
+
+  // sidecar：统计脚本的数据源（读事件日志、聚合每回合用量）
+  const side = await ensureSidecar(dist);
+  say(`turn-stats: 统计服务 ${side.running ? `运行中 :${side.port}` : side.spawned ? "拉起失败" : "未运行"}`);
 
   // 自更新：放最后，失败静默、限时预算（self-update.mjs）
   if (!has("--no-update") && !process.env.TURN_STATS_NO_UPDATE && Date.now() - startedAt < 9000) {
