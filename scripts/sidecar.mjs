@@ -26,6 +26,7 @@ import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 import { writeFileSync, existsSync, readFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -49,6 +50,12 @@ const IDLE_EXIT_MS = 30 * 60_000;     // 这么久没有 /state 拉取（应用�
 
 let TOKEN = randomBytes(16).toString("hex");
 let PORT = 0;
+
+// 不钉住插件目录：引擎安装/更新要把 managed/turn-stats 整个 rename 成
+// *-previous，任何进程的 CWD 停在里面都会让它 EBUSY（安装失败）。
+// 本服务由 hook 从插件目录里拉起并长期存活，启动后立刻把 CWD 挪走——
+// 上面用到的路径全部是绝对路径，挪走不影响任何功能
+try { process.chdir(homedir()); } catch {}
 
 function writeAtomic(fp, data) {
   const tmp = `${fp}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;

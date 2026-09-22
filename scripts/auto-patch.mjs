@@ -173,6 +173,7 @@ async function ensureSidecar(dist) {
   const child = spawn(process.execPath, [join(PLUGIN_ROOT, "scripts", "sidecar.mjs")], {
     detached: true,
     stdio: "ignore",
+    cwd: homedir(),   // 别让子进程把 CWD 带进插件目录，否则引擎安装/升级 rename 该目录会 EBUSY
     env: { ...process.env, TURN_STATS_ASSETS: assetsDir },
     windowsHide: true,
   });
