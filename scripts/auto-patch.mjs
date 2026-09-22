@@ -69,35 +69,38 @@ function writeAtomic(fp, data) {
 
 // --- 补丁 / 还原 --------------------------------------------------------------------
 // 备份内容 = 当前 index.html 去掉本插件注入行，每次打补丁跟随刷新（应用更新、
-// 其他插件增删后仍是干净基线），卸载不会恢复出过期页面或 ghost 标签
+// 其他插件增删后仍是干净基线），卸载不会恢复出过期页面或 ghost 标签。
+// script 标签带 ?v=版本号：app:// 协议对同 URL 资源有缓存，换内容不换 URL 会
+// 读到旧脚本；版本号变化 → URL 变化 → 强制绕过缓存。
+function scriptTag() {
+  return `    <script src="/assets/${SCRIPT_NAME}?v=${VERSION}"></script>\n`;
+}
+
 function patchHtml(indexPath) {
   const html = readFileSync(indexPath, "utf8");
   const backupPath = join(dirname(indexPath), BACKUP_NAME);
-  const clean = html.split("\n").filter((l) => !l.includes(SCRIPT_NAME)).join("\n");
+  const clean = html
+    .split("\n")
+    .filter((l) => !l.includes(SCRIPT_NAME))
+    .join("\n");
   if (!clean.includes("</body>")) throw new Error("index.html 结构异常");
   let cur = null;
   try { cur = readFileSync(backupPath, "utf8"); } catch {}
   if (cur !== clean) writeAtomic(backupPath, clean);
-  const scriptTag = `    <script src="/assets/${SCRIPT_NAME}"></script>\n`;
-  writeFileSync(indexPath, clean.replace("</body>", `${scriptTag}</body>`), "utf8");
+  writeFileSync(indexPath, clean.replace("</body>", `${scriptTag()}</body>`), "utf8");
 }
 
 function uninstallDist(dist) {
   const indexPath = join(dist, "index.html");
   const backupPath = join(dist, BACKUP_NAME);
   if (existsSync(backupPath)) {
-    copyBackup(backupPath, indexPath);
+    writeAtomic(indexPath, readFileSync(backupPath, "utf8"));
     rmSync(backupPath, { force: true });
   } else if (existsSync(indexPath)) {
     const html = readFileSync(indexPath, "utf8");
     writeFileSync(indexPath, html.split("\n").filter((l) => !l.includes(SCRIPT_NAME)).join("\n"), "utf8");
   }
   rmSync(join(dist, "assets", SCRIPT_NAME), { force: true });
-}
-
-function copyBackup(from, to) {
-  // 直接恢复备份（备份即干净基线）
-  writeAtomic(to, readFileSync(from, "utf8"));
 }
 
 // --- 注入 ------------------------------------------------------------------------
@@ -111,7 +114,8 @@ function injectUI(dist) {
   const stale = !existsSync(runtimePath) || !readFileSync(runtimePath, "utf8").includes(`turn-stats@${VERSION}`);
   if (patched && !stale && !has("--force")) return false;
   writeFileSync(runtimePath, `/* turn-stats@${VERSION} */\n` + template, "utf8");
-  if (!patched || has("--force")) patchHtml(indexPath);
+  // 始终重写标签：升级时 ?v= 随之变化，绕过 app:// 的脚本缓存
+  patchHtml(indexPath);
   return true;
 }
 
