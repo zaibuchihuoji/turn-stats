@@ -246,6 +246,8 @@ function readBody(req) {
   });
 }
 
+let DIAG = null;   // 渲染进程上报的消息区 DOM 结构（锚点策略分析用）
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   if (req.method === "OPTIONS") { res.writeHead(204, CORS); res.end(); return; }
@@ -256,7 +258,13 @@ const server = createServer(async (req, res) => {
   if (auth !== `Bearer ${TOKEN}`) return json(res, 401, { ok: false, error: "未授权" });
   try {
     if (req.method === "GET" && url.pathname === "/state") {
-      return json(res, 200, statePayload());
+      const s = statePayload();
+      return json(res, 200, { ...s, diag: DIAG });
+    }
+    if (req.method === "POST" && url.pathname === "/diag") {
+      const b = await readBody(req);
+      DIAG = { at: new Date().toISOString(), ...b };
+      return json(res, 200, { ok: true });
     }
     if (req.method === "POST" && url.pathname === "/touch") {
       const b = await readBody(req);

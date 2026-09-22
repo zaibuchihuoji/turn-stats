@@ -74,7 +74,7 @@
 @media (prefers-color-scheme: light){.ts-scope:not(.dark):not(.light){
   --ts-fg:#3d3d46;--ts-dim:rgba(61,61,70,.55);--ts-border:rgba(0,0,0,.14);
   --ts-bg:rgba(255,255,255,.94);--ts-card:rgba(0,0,0,.05)}}
-.ts-chip{position:fixed;right:18px;bottom:118px;z-index:2147483000;display:flex;gap:4px 10px;
+.ts-chip{position:fixed;right:18px;top:38%;z-index:2147483000;display:flex;gap:4px 10px;
   align-items:baseline;padding:6px 12px;border-radius:10px;border:1px solid var(--ts-border);
   background:var(--ts-bg);color:var(--ts-fg);font-size:11px;line-height:1.5;
   box-shadow:0 4px 16px rgba(0,0,0,.25);user-select:text;font-variant-numeric:tabular-nums;
@@ -183,6 +183,40 @@
   }
 
   // -------------------------------------------------------------------------
+  // 诊断上报：把消息区真实结构发给 sidecar（/diag），供锚点策略离线分析
+  // -------------------------------------------------------------------------
+  function reportDiag(state) {
+    if (reportDiag.at && Date.now() - reportDiag.at < 30000) return;   // 30s 一次
+    reportDiag.at = Date.now();
+    try {
+      const c = client;
+      if (!c.port) return;
+      const dump = (el) => ({
+        tag: el.tagName, cls: String(el.className).slice(0, 80),
+        turnId: el.dataset?.turnId ?? "",
+        text: (el.textContent ?? "").replace(/\s+/g, " ").slice(0, 40),
+        rect: (({ x, y, width, height }) => ({ x: Math.round(x), y: Math.round(y), w: Math.round(width), h: Math.round(height) }))(el.getBoundingClientRect()),
+      });
+      const payload = {
+        url: location.pathname,
+        sessionId: currentSessionId(),
+        candidates: [...document.querySelectorAll("[data-turn-id], .u-turn")].slice(0, 30).map(dump),
+        composer: (() => {
+          const pm = document.querySelector(".ProseMirror");
+          return pm ? dump(pm.closest('[class*="composer"]') ?? pm) : null;
+        })(),
+      };
+      fetch(`http://127.0.0.1:${c.port}/diag`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${c.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(3000),
+      }).catch(() => {});
+    } catch {}
+  }
+  reportDiag.at = 0;
+
+  // -------------------------------------------------------------------------
   // 启动 + 诊断（window.__turnStatsState）
   // -------------------------------------------------------------------------
   const diag = { bootAt: Date.now(), sidecar: "?", polled: 0, lastError: "", chip: false };
@@ -194,6 +228,7 @@
       diag.sidecar = `v${state.version}`;
       diag.lastError = "";
       diag.chip = !!document.getElementById("turn-stats-chip");
+      reportDiag(state);
     } catch (e) {
       diag.lastError = String(e?.message ?? e);
       document.getElementById("turn-stats-chip")?.remove();
