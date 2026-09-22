@@ -77,6 +77,7 @@ function getBucket(map, key, time) {
       startT: Number(time) || Date.now(),
       endT: 0, durationMs: 0, reason: "",
       in: 0, out: 0, cacheRead: 0, cacheCreation: 0,
+      decodeMs: 0, firstTokenMs: 0,
       done: false,
     });
     prune(map);
@@ -124,10 +125,17 @@ function processLine(line) {
   }
   if (type === "turn.step.completed") {
     addUsage(t, p.usage ?? {});
+    // 纯生成计时：跨 step 累加（多步回合的吞吐 = 总输出 / 总解码时间）
+    t.decodeMs += Number(p.llmServerDecodeMs ?? 0);
+    if (!t.firstTokenMs) t.firstTokenMs = Number(p.llmServerFirstTokenMs ?? 0);
     // 子代理的消耗归入当时进行中的主回合
     if (!isMain) {
       const mk = currentMain.get(sessionId);
-      if (mk) addUsage(turns.get(mk), p.usage ?? {});
+      if (mk) {
+        addUsage(turns.get(mk), p.usage ?? {});
+        const mt = turns.get(mk);
+        mt.decodeMs += Number(p.llmServerDecodeMs ?? 0);
+      }
     }
     return;
   }

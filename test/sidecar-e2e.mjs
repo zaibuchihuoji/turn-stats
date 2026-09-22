@@ -24,12 +24,12 @@ const assert = (c, m) => { if (!c) { console.error("FAIL: " + m); child.kill(); 
 // 第一批事件：回合 0（2 个 step + 子代理消耗归入）+ 回合 1（1 个 step）
 const batch1 = [
   ev("turn.started", { time: 1000, turnId: 0, prompt: "测试一", agentId: "main" }, 1),
-  ev("turn.step.completed", { time: 1500, turnId: 0, agentId: "main", usage: { inputOther: 100, output: 200, inputCacheRead: 3000, inputCacheCreation: 10 } }, 2),
-  ev("turn.step.completed", { time: 1800, turnId: 0, agentId: "agent-0", usage: { inputOther: 500, output: 60, inputCacheRead: 0, inputCacheCreation: 0 } }, 3),
-  ev("turn.step.completed", { time: 2000, turnId: 0, agentId: "main", usage: { inputOther: 50, output: 150, inputCacheRead: 1000, inputCacheCreation: 0 } }, 4),
+  ev("turn.step.completed", { time: 1500, turnId: 0, agentId: "main", usage: { inputOther: 100, output: 200, inputCacheRead: 3000, inputCacheCreation: 10 }, llmServerDecodeMs: 2000, llmServerFirstTokenMs: 800 }, 2),
+  ev("turn.step.completed", { time: 1800, turnId: 0, agentId: "agent-0", usage: { inputOther: 500, output: 60, inputCacheRead: 0, inputCacheCreation: 0 }, llmServerDecodeMs: 900 }, 3),
+  ev("turn.step.completed", { time: 2000, turnId: 0, agentId: "main", usage: { inputOther: 50, output: 150, inputCacheRead: 1000, inputCacheCreation: 0 }, llmServerDecodeMs: 1000, llmServerFirstTokenMs: 700 }, 4),
   ev("turn.ended", { time: 2600, turnId: 0, agentId: "main", durationMs: 1600, reason: "completed" }, 5),
   ev("turn.started", { time: 5000, turnId: 1, agentId: "main", prompt: "测试二" }, 6),
-  ev("turn.step.completed", { time: 6000, turnId: 1, agentId: "main", usage: { inputOther: 30, output: 40, inputCacheRead: 0, inputCacheCreation: 0 } }, 7),
+  ev("turn.step.completed", { time: 6000, turnId: 1, agentId: "main", usage: { inputOther: 30, output: 40, inputCacheRead: 0, inputCacheCreation: 0 }, llmServerDecodeMs: 500 }, 7),
   ev("turn.ended", { time: 6500, turnId: 1, agentId: "main", durationMs: 1500, reason: "completed" }, 8),
 ];
 writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.join("\n") + "\n");
@@ -55,6 +55,8 @@ const t0 = st.turns.find((t) => t.turnId === 0);
 assert(t0.in === 100 + 3000 + 10 + 50 + 1000 + 500, `回合 0 输入含缓存与子代理归入（${t0.in}）`);
 assert(t0.out === 200 + 150 + 60, `回合 0 输出含子代理（${t0.out}）`);
 assert(t0.durationMs === 1600, "时长用服务端 turn.ended 值");
+assert(t0.decodeMs === 2000 + 1000 + 900, `纯生成解码时间跨 step/子代理累加（${t0.decodeMs}）`);
+assert(st.turns.some((t) => t.turnId === 1 && t.decodeMs === 500), "单回合解码时间");
 assert(!st.turns.some((t) => t.agentId && t.agentId !== "main"), "子代理独立桶不外发");
 
 // 增量追加：回合 2 + 一个写一半的 turn.ended 残行（下轮补全后应恰好计一次）

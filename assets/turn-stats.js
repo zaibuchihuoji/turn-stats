@@ -123,7 +123,7 @@
       span.append(kEl, vEl);
       line.appendChild(span);
     };
-    const speed = t.durationMs > 500 ? t.out / (t.durationMs / 1000) : 0;
+    const speed = t.decodeMs > 300 ? t.out / (t.decodeMs / 1000) : 0;
     put("耗时", fmtDuration(t.durationMs));
     if (t.cacheRead > 0) {
       put("输入", `${fmtTokens(t.in)}（缓存 ${fmtTokens(t.cacheRead)}）`);
@@ -131,12 +131,13 @@
       put("输入", fmtTokens(t.in));
     }
     put("输出", fmtTokens(t.out));
-    if (speed > 0) put("速度", `${Math.round(speed)} tok/s`);
+    if (speed > 0) put("生成", `${Math.round(speed)} tok/s`);
     line.title = [
       `输入合计 ${t.in.toLocaleString()} tok = 新增 ${fmtTokens(t.in - t.cacheRead - t.cacheCreation)} + 缓存读 ${t.cacheRead.toLocaleString()} + 缓存创建 ${t.cacheCreation.toLocaleString()}`,
-      `输出 ${t.out.toLocaleString()} tok · 结束原因 ${t.reason || "completed"}`,
-      `会话 ${t.sessionId.slice(0, 26)}… · 回合 #${t.turnId}`,
-    ].join("\n");
+      `输出 ${t.out.toLocaleString()} tok · 纯生成 ${((t.decodeMs ?? 0) / 1000).toFixed(1)} 秒（速度不含思考与工具等待）`,
+      t.firstTokenMs ? `首字延迟 ${(t.firstTokenMs / 1000).toFixed(1)} 秒` : "",
+      `结束原因 ${t.reason || "completed"} · 会话 ${t.sessionId.slice(0, 26)}… · 回合 #${t.turnId}`,
+    ].filter(Boolean).join("\n");
     return line;
   }
 

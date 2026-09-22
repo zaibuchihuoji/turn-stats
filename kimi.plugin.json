@@ -1,7 +1,7 @@
 {
   "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
   "name": "turn-stats",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "在 Kimi Code Desktop 每轮回答下方显示本轮 token 消耗、耗时与生成速度。",
   "keywords": [
     "token",
