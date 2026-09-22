@@ -62,13 +62,14 @@
   let lastState = null;
 
   function ingest(state) {
-    // 服务器返回按 endT 降序
+    // 服务器返回按 endT 降序；统一整理成升序（最旧在前），配对逻辑依赖此顺序
     for (const t of state.turns ?? []) {
       const key = `${t.sessionId}|${t.turnId}|${t.endT}`;
       if (rendered.has(key)) continue;
       records.push({ key, t, attached: null });
       rendered.add(key);
     }
+    records.sort((a, b) => a.t.endT - b.t.endT);
     while (records.length > 60) records.shift();
     // 只保留最近 60 分钟未挂载的
     const now = Date.now();
@@ -124,12 +125,16 @@
     };
     const speed = t.durationMs > 500 ? t.out / (t.durationMs / 1000) : 0;
     put("耗时", fmtDuration(t.durationMs));
-    put("输入", fmtTokens(t.in));
+    if (t.cacheRead > 0) {
+      put("输入", `${fmtTokens(t.in)}（缓存 ${fmtTokens(t.cacheRead)}）`);
+    } else {
+      put("输入", fmtTokens(t.in));
+    }
     put("输出", fmtTokens(t.out));
     if (speed > 0) put("速度", `${Math.round(speed)} tok/s`);
     line.title = [
-      `本轮输入 ${t.in.toLocaleString()} tok（缓存读 ${t.cacheRead.toLocaleString()} / 缓存创建 ${t.cacheCreation.toLocaleString()}）`,
-      `本轮输出 ${t.out.toLocaleString()} tok · 结束原因 ${t.reason || "completed"}`,
+      `输入合计 ${t.in.toLocaleString()} tok = 新增 ${fmtTokens(t.in - t.cacheRead - t.cacheCreation)} + 缓存读 ${t.cacheRead.toLocaleString()} + 缓存创建 ${t.cacheCreation.toLocaleString()}`,
+      `输出 ${t.out.toLocaleString()} tok · 结束原因 ${t.reason || "completed"}`,
       `会话 ${t.sessionId.slice(0, 26)}… · 回合 #${t.turnId}`,
     ].join("\n");
     return line;
@@ -173,7 +178,9 @@
       try {
         turnEl.appendChild(buildLine(r.t));
         r.attached = now;
-      } catch {}
+      } catch (err) {
+        diag.lastAttachError = String((err && err.stack) || err).slice(0, 200);
+      }
     }
   }
 
@@ -181,7 +188,7 @@
   // 启动 + 诊断（window.__turnStatsState）
   // -------------------------------------------------------------------------
   const diag = { bootAt: Date.now(), sidecar: "?", polled: 0, lastError: "",
-    turnsKnown: 0, lastTurnElements: 0, attachedCount: 0 };
+    turnsKnown: 0, lastTurnElements: 0, attachedCount: 0, lastAttachError: "", sampleTail: "" };
 
   async function tick() {
     try {
