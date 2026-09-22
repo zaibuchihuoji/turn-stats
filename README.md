@@ -13,15 +13,18 @@
 
 ## 原理
 
-会话启动 hook 注入一段渲染脚本到 `desktop-dist/`（`app://` 协议实时读盘，
-与 usage-union 同一技术路线）。脚本每 2 秒轮询本地 server 的 `/api/v1/sessions`：
+会话启动 hook 注入渲染脚本到 `desktop-dist/`（`app://` 协议实时读盘，
+与 usage-union 同一技术路线），并拉起一个本地统计服务（sidecar）：
 
-- 检测回合边界：会话 `busy` / `main_turn_active` 双双转 false = 本轮结束
-- 本轮消耗 = 回合结束快照 − 回合开始快照（会话级累计 usage 的差值，
-  字段：input_tokens / output_tokens / cache_read_tokens / total_cost_usd / turn_count）
-- 结束后延迟 1.2s 再取一次终值，避免流式收尾的最后一段 token 漏算
-- 渲染锚点是消息区每轮的 `[data-turn-id]` 元素（逆向自宿主 SPA），宿主重渲染后
-  2 秒内自动补挂
+- **数据源**：本地 server 落盘的事件日志 `~/.kimi-code/server/events/session_<id>.jsonl`。
+  事件 `turn.started` / `turn.step.completed` / `turn.ended` 携带每步真实 token 用量
+  （`inputOther` 非缓存输入 / `output` / `inputCacheRead` / `inputCacheCreation`）、
+  服务器计时的回合时长（`durationMs`）与纯生成解码时间（`llmServerDecodeMs`）
+- **聚合**：sidecar 增量监听事件文件（只消费完整行，半行等补全），按回合累加；
+  Task 子代理（agent-N）的消耗按发生时间归入当时进行中的主回合
+- **渲染**：脚本每 2 秒拉取 sidecar 的已完成回合，只取**当前打开会话**的记录
+  （按页面 URL 里的会话 id 过滤，防跨会话串数据），插入最后一个
+  `[data-turn-id]` 元素；宿主重渲染后 2 秒内幂等重挂
 
 ## 安装
 
@@ -56,9 +59,11 @@ node scripts/auto-patch.mjs --uninstall     # 还原 desktop-dist
 
 ## 已知限制
 
-- 挂机期间错过回合开始（应用开着但脚本中途才注入）时，该轮数值只覆盖观察窗口，
-  耗时前带 `≈` 标记
-- 统计跟随"正在干活的会话"；如果你在模型干活时切到别的会话查看，统计行会插在
-  当前打开的会话的最后一轮下方（悬停可看会话名核对）
-- 依赖逆向的非公开契约（`/api/v1/sessions` 字段、`[data-turn-id]` 锚点），应用
-  大版本更新后可能静默失效——`--status` 可查注入状态，重开一次会话会自动重注入
+- sidecar 冷启动只回读每个事件文件的末尾 256KB——特别长的历史回合可能聚合不全
+  （只影响"补显示旧回合"，新回合永远完整）
+- 统计行只挂**当前打开会话**的回合；如果你在模型干活时切到别的会话查看，那轮
+  统计不显示（悬停明细里有会话名可核对）
+- Task 子代理的生成时间与主回合并行，"生成 tok/s"按主回合 wall-clock 内的
+  总输出 / 总解码时间计算
+- 依赖逆向的非公开契约（事件日志字段、`[data-turn-id]` 锚点），应用大版本更新
+  后可能静默失效——`--status` 可查注入状态，重开一次会话会自动重注入

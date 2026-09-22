@@ -71,11 +71,26 @@
     }
     records.sort((a, b) => a.t.endT - b.t.endT);
     while (records.length > 60) records.shift();
-    // 只保留最近 60 分钟未挂载的
+    // 只保留最近 60 分钟的记录（可挂载窗口）
     const now = Date.now();
     for (let i = records.length - 1; i >= 0; i--) {
-      if (records[i].attached && now - records[i].t.endT > ATTACH_TTL) records.splice(i, 1);
+      if (now - records[i].t.endT > ATTACH_TTL) records.splice(i, 1);
     }
+  }
+
+  function currentSessionId() {
+    // 会话页 URL 形如 app://renderer/sessions/session_xxx；新建未保存的聊天没有 id
+    const m = /sessions\/(session_[\w-]+)/.exec(location.pathname);
+    return m ? m[1] : null;
+  }
+
+  function visibleRecords() {
+    // 只渲染当前打开会话的回合——sidecar 聚合的是所有会话，不过滤就会把别的
+    // 会话（甚至重启前遗留的）统计混进当前聊天，正是"数据不对版"的一种来源。
+    // URL 无会话 id（刚新建的聊天）时退化为只显示最新一条。
+    const sid = currentSessionId();
+    const mine = records.filter((r) => !sid || r.t.sessionId === sid);
+    return mine.length ? mine : records.slice(-1);
   }
 
   // -------------------------------------------------------------------------
@@ -142,8 +157,9 @@
   }
 
   function turnCandidates() {
+    // 排除 cron 通知元素与会话目录（conversation-toc 的条目也可能带 data-turn-id）
     return [...document.querySelectorAll("[data-turn-id]")]
-      .filter((el) => el.dataset.turnId && !/cron/i.test(el.className));
+      .filter((el) => el.dataset.turnId && !/cron/i.test(el.className) && !el.closest(".conversation-toc"));
   }
 
   function ensureStyle() {
@@ -157,28 +173,26 @@
   }
 
   function attachStats() {
-    if (!records.length) return;
+    const vis = visibleRecords();
+    if (!vis.length) return;
     ensureStyle();
     const turns = turnCandidates();
     if (!turns.length) return;
-    const now = Date.now();
-    // records 按结束时间升序追加；最新记录配最后一轮，依次向前
-    for (let i = records.length - 1; i >= 0; i--) {
-      const r = records[i];
-      if (r.attached) continue;
-      const idx = turns.length - 1 - (records.length - 1 - i);
+    // vis 按结束时间升序；最新记录配最后一轮，依次向前；回合元素不足则跳过最旧。
+    // 不做"已挂载就跳过"：宿主 SPA 重渲染会抹掉统计行，按存在性幂等重挂
+    for (let i = vis.length - 1; i >= 0; i--) {
+      const r = vis[i];
+      const idx = turns.length - 1 - (vis.length - 1 - i);
       if (idx < 0) break;
       const turnEl = turns[idx];
-      let occupied = false, already = false;
+      let already = false, occupied = false;
       for (const el of turnEl.querySelectorAll(".ts-line")) {
         occupied = true;
         if (el.dataset.tsKey === r.key) already = true;
       }
-      if (already) { r.attached = now; continue; }
-      if (occupied) continue;
+      if (already || occupied) continue;
       try {
         turnEl.appendChild(buildLine(r.t));
-        r.attached = now;
       } catch (err) {
         diag.lastAttachError = String((err && err.stack) || err).slice(0, 200);
       }
@@ -205,11 +219,11 @@
     }
     diag.polled++;
     diag.turnsKnown = rendered.size;
-    diag.attachedCount = records.filter((r) => r.attached).length;
+    diag.attachedCount = document.querySelectorAll(".ts-line").length;
     diag.lastTurnElements = turnCandidates().length;
     try {
       window.__turnStatsState = { ...diag, loadError,
-        lastTurns: records.slice(-3).map((r) => ({ in: r.t.in, out: r.t.out, ms: r.t.durationMs, attached: !!r.attached })) };
+        lastTurns: records.slice(-3).map((r) => ({ in: r.t.in, out: r.t.out, ms: r.t.durationMs, sid: r.t.sessionId.slice(0, 14) })) };
     } catch {}
     attachStats();
   }

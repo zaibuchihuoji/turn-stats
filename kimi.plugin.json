@@ -1,8 +1,8 @@
 {
   "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
   "name": "turn-stats",
-  "version": "0.3.3",
-  "description": "在 Kimi Code Desktop 每轮回答下方显示本轮 token 消耗、耗时与生成速度。",
+  "version": "0.4.0",
+  "description": "在 Kimi Code Desktop 每轮回答下方显示本轮 token 消耗、耗时与生成速度（含子代理）。",
   "keywords": [
     "token",
     "usage",
@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "Turn Stats（回合统计）",
     "shortDescription": "每轮回答下方显示 token 消耗 / 用时 / 生成速度",
-    "longDescription": "通过 SessionStart hook 注入渲染脚本：轮询本地 server 的会话状态，检测每轮对话（busy→idle）结束，用回合前后的会话 usage 差值计算本轮 token 消耗（输入/输出/缓存/费用），结合耗时得到生成速度，以一行小字插在最后一轮回答下方。会话启动时自动检查并修复注入（应用更新后自动恢复）；支持 codeload 通道自更新。卸载：让 AI 执行插件 scripts/auto-patch.mjs --uninstall。",
+    "longDescription": "通过 SessionStart hook 注入渲染脚本并拉起本地统计服务：服务监听本地 server 落盘的事件日志（server/events/session_<id>.jsonl），按回合聚合 turn.step.completed 的真实 token 用量（输入含缓存拆解 / 输出）与服务器计时的回合时长、纯生成解码时间。每轮对话结束后在最后一轮回答下方插入统计行（耗时 / 输入 / 输出 / 生成 tok/s），悬停看缓存与首字延迟明细；Task 子代理的消耗归入当轮主回合。会话启动时自动检查并修复注入（应用更新后自动恢复）；支持 codeload 通道自更新。卸载：让 AI 执行插件 scripts/auto-patch.mjs --uninstall。",
     "developerName": "turn-stats"
   }
 }

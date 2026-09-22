@@ -67,6 +67,7 @@ function writeClientConfig() {
 const turns = new Map();         // `${sessionId}|main|${turnId}` -> main turn
 const subBuckets = new Map();    // `${sessionId}|${agentId}|${turnId}` -> 子代理独立桶（不外发）
 const currentMain = new Map();   // sessionId -> 进行中的主回合 key
+const pendingSubs = new Map();   // sessionId -> [{usage, decodeMs}] 主回合未观察到 started 时的子代理步
 const fileOffsets = new Map();   // 文件路径 -> 已消费到的字节（按完整行推进）
 let filesScanned = 0;
 
@@ -120,21 +121,28 @@ function processLine(line) {
 
   if (type === "turn.started") {
     t.startT = Number(p.time) || t.startT;
-    if (isMain) currentMain.set(sessionId, key);
+    if (isMain) {
+      // 新主回合开始：清掉上一回合结束后仍未归属的散落子代理步（无法归属即丢弃）
+      pendingSubs.delete(sessionId);
+      currentMain.set(sessionId, key);
+    }
     return;
   }
   if (type === "turn.step.completed") {
     addUsage(t, p.usage ?? {});
-    // 纯生成计时：跨 step 累加（多步回合的吞吐 = 总输出 / 总解码时间）
-    t.decodeMs += Number(p.llmServerDecodeMs ?? 0);
+    const decode = Number(p.llmServerDecodeMs ?? 0);
+    t.decodeMs += decode;
     if (!t.firstTokenMs) t.firstTokenMs = Number(p.llmServerFirstTokenMs ?? 0);
-    // 子代理的消耗归入当时进行中的主回合
+    // 子代理的消耗归入当时进行中的主回合；sidecar 启动晚、错过主回合 started
+    // 时先暂存，待主回合 ended 时按时间窗归入
     if (!isMain) {
       const mk = currentMain.get(sessionId);
       if (mk) {
         addUsage(turns.get(mk), p.usage ?? {});
-        const mt = turns.get(mk);
-        mt.decodeMs += Number(p.llmServerDecodeMs ?? 0);
+        turns.get(mk).decodeMs += decode;
+      } else {
+        if (!pendingSubs.has(sessionId)) pendingSubs.set(sessionId, []);
+        pendingSubs.get(sessionId).push({ usage: p.usage ?? {}, decodeMs: decode });
       }
     }
     return;
@@ -143,8 +151,16 @@ function processLine(line) {
     t.endT = Number(p.time) || Date.now();
     t.durationMs = Number(p.durationMs ?? 0) || Math.max(0, t.endT - t.startT);
     t.reason = p.reason ?? "completed";
+    if (isMain) {
+      // 归入暂存的子代理步（sidecar 中途启动 / 冷启动窗口截断的场景）
+      for (const s of pendingSubs.get(sessionId) ?? []) {
+        addUsage(t, s.usage);
+        t.decodeMs += s.decodeMs;
+      }
+      pendingSubs.delete(sessionId);
+      if (currentMain.get(sessionId) === key) currentMain.delete(sessionId);
+    }
     t.done = true;
-    if (isMain && currentMain.get(sessionId) === key) currentMain.delete(sessionId);
   }
 }
 

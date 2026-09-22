@@ -192,8 +192,9 @@ async function main() {
   const side = await ensureSidecar(dist);
   say(`turn-stats: 统计服务 ${side.running ? `运行中 :${side.port}` : side.spawned ? "拉起失败" : "未运行"}`);
 
-  // 自更新：放最后，失败静默、限时预算（self-update.mjs）
-  if (!has("--no-update") && !process.env.TURN_STATS_NO_UPDATE && Date.now() - startedAt < 9000) {
+  // 自更新：放最后，失败静默、限时预算（self-update.mjs）。
+  // 本次拉起过 sidecar 时跳过（hook 总时长有限，优先保证首次启动轻快）
+  if (!has("--no-update") && !process.env.TURN_STATS_NO_UPDATE && !side.spawned && Date.now() - startedAt < 9000) {
     try {
       const r = await su.selfUpdate({
         repo: REPO, pluginRoot: PLUGIN_ROOT, currentVersion: VERSION,
