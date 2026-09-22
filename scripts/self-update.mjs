@@ -4,7 +4,10 @@
  * 设计原则：
  *  - 只依赖 codeload.github.com（国内直连可达，与引擎安装插件是同一通道）；
  *    github.com / api.github.com 直连常不可达，不进入依赖路径
- *  - 每 24h 最多联网检查一次（.update-state.json 缓存），其余会话零开销
+ *  - 每 24h 最多联网检查一次（.update-state.json 缓存）；检查失败走 1h 短退避，
+ *    不占用 24h 缓存（瞬时网络故障不能压制更新一整天）
+ *  - 目录锁防并发（多窗口同时开会话）；交换前检查 deadline，绝不在预算耗尽时
+ *    开始交换（hook 有 15s 超时，被杀在交换中间会让插件目录半残）
  *  - 开发副本（目录含 .git）永不自更新，避免覆盖本地改动
  *  - 任何错误静默返回，绝不阻塞会话启动；更新在下一会话生效
  *    （本会话代码已加载，替换文件只影响之后启动的 hook 与注入）
@@ -13,11 +16,15 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, readdirSync, renameSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, sep } from "node:path";
 import zlib from "node:zlib";
 
 const CHECK_INTERVAL = 24 * 3600_000;
+const FAIL_BACKOFF = 3600_000;   // 检查失败后的退避：瞬时网络故障不该放大成 24h 不检查
 const DOWNLOAD_TIMEOUT = 8000;
+const LOCK_NAME = ".update-lock.json";
+const LOCK_TTL = 120_000;        // 锁超过该时长视为持有者已死，可接管
+const SWAP_RESERVE_MS = 1500;    // 目录交换留给最后阶段的最低时间余量
 
 function readJson(p) {
   try { return JSON.parse(readFileSync(p, "utf8")); } catch { return null; }
@@ -34,6 +41,16 @@ export function isNewer(a, b) {
     if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0);
   }
   return false;
+}
+
+/** 在 baseDir 内安全解析 rel；逃出 baseDir 的路径（zip-slip）返回 null。
+ *  必须比较到路径分隔符：否则 "../.update-newEvil/x" 这类仅前缀相同的
+ *  兄弟目录会被 startsWith(base) 误放行。 */
+export function resolveSafe(baseDir, rel) {
+  const base = resolve(baseDir);
+  const prefix = base.endsWith(sep) ? base : base + sep;
+  const fp = resolve(join(base, rel));
+  return fp === base || fp.startsWith(prefix) ? fp : null;
 }
 
 /** 最小 zip 解包：codeload 的 zip 是「顶层单目录 + deflate 条目」，无需第三方依赖 */
@@ -68,19 +85,23 @@ export function extractZip(buf) {
   return files;
 }
 
-async function fetchBranchZip(repo, ref, log) {
+async function fetchBranchZip(repo, ref, log, timeoutMs = DOWNLOAD_TIMEOUT) {
   const res = await fetch(`https://codeload.github.com/${repo}/zip/refs/heads/${ref}`, {
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  log(`已下载 ${repo}@${ref}（${Math.round(res.headers.get("content-length") ?? 0 / 1024)}）`);
+  const bytes = Number(res.headers.get("content-length") ?? 0);
+  log(`已下载 ${repo}@${ref}（${Math.round(bytes / 1024)}KB）`);
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function applyUpdate({ repo, pluginRoot, currentVersion, log }) {
+async function applyUpdate({ repo, pluginRoot, currentVersion, log, deadline = Infinity }) {
+  const timeLeft = () => deadline - Date.now();
   let zip = null;
   for (const ref of ["main", "master"]) {
-    try { zip = await fetchBranchZip(repo, ref, log); break; } catch (e) { log(`下载 ${ref} 分支失败：${e?.message ?? e}`); }
+    if (timeLeft() < SWAP_RESERVE_MS) throw new Error("时间预算不足");
+    const timeout = Math.max(1500, Math.min(DOWNLOAD_TIMEOUT, timeLeft() - SWAP_RESERVE_MS));
+    try { zip = await fetchBranchZip(repo, ref, log, timeout); break; } catch (e) { log(`下载 ${ref} 分支失败：${e?.message ?? e}`); }
   }
   if (!zip) throw new Error("codeload 不可达");
   const files = extractZip(zip);
@@ -99,14 +120,18 @@ async function applyUpdate({ repo, pluginRoot, currentVersion, log }) {
   for (const [path, data] of files) {
     const rel = path.slice(top.length + 1);
     if (!rel || rel === ".update-state.json") continue;
-    const fp = join(tmpDir, rel);
+    const fp = resolveSafe(tmpDir, rel);
+    if (!fp) continue;   // zip-slip 防护：拒绝逃出暂存目录的路径
     mkdirSync(dirname(fp), { recursive: true });
     writeFileSync(fp, data);
   }
 
-  // 交换：当前文件 → .update-old，暂存文件 → 插件根；中途失败完整回滚
+  // 交换：当前文件 → .update-old，暂存文件 → 插件根；中途失败完整回滚。
+  // 预算检查放交换前：下载/解包可以慢慢重试，交换一旦开始就必须跑完，
+  // 绝不能被 hook 超时杀在中间态（插件目录半残）。
+  if (timeLeft() < SWAP_RESERVE_MS) throw new Error("时间预算不足，交换前放弃（下轮重试）");
   mkdirSync(oldDir, { recursive: true });
-  const keep = new Set([".update-new", ".update-old", ".update-state.json", ".git"]);
+  const keep = new Set([".update-new", ".update-old", ".update-state.json", ".update-lock.json", ".git"]);
   const movedIn = [];
   try {
     for (const name of readdirSync(pluginRoot)) {
@@ -133,12 +158,31 @@ async function applyUpdate({ repo, pluginRoot, currentVersion, log }) {
   return { applied: true, version: newVersion };
 }
 
+/** 并发锁：同一插件目录同时只允许一个会话执行更新交换（双窗口同时开会话的场景）。
+ *  锁带 TTL：持有者崩溃后超时可被接管。返回锁文件路径，拿不到返回 null。 */
+export function acquireUpdateLock(pluginRoot) {
+  const lockPath = join(pluginRoot, LOCK_NAME);
+  let takeover = false;
+  try {
+    const cur = readJson(lockPath);
+    if (cur && Date.now() - (cur.at ?? 0) < LOCK_TTL) return null;
+    takeover = true;   // 存在但已过期 → 接管
+  } catch {}           // 不存在 → 直接创建
+  try {
+    if (takeover) rmSync(lockPath, { force: true });
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { flag: "wx" });
+    return lockPath;
+  } catch { return null; }
+}
+
 /**
  * 检查并应用自更新。
+ * deadline：绝对时间戳（ms），超过后不再开始目录交换（供 hook 模式留出超时余量）；
+ *           不传则无预算限制（手动 --check-update）。
  * 返回 { applied, version? } | { applied: false, latest?, reason? } | { skipped, ... }
  * 调用方（hook）自行兜底 try/catch 与时间预算。
  */
-export async function selfUpdate({ repo, pluginRoot, currentVersion, log = () => {}, force = false }) {
+export async function selfUpdate({ repo, pluginRoot, currentVersion, log = () => {}, force = false, deadline = Infinity }) {
   const statePath = join(pluginRoot, ".update-state.json");
   // 开发副本守卫不受 force 影响：force 只表示"无视 24h 缓存"，任何情况下都
   // 不能覆盖开发者的本地改动
@@ -147,20 +191,30 @@ export async function selfUpdate({ repo, pluginRoot, currentVersion, log = () =>
   }
   const state = readJson(statePath) ?? {};
   const now = Date.now();
-  if (!force && state.checkedAt && now - state.checkedAt < CHECK_INTERVAL && state.version === currentVersion) {
-    return { skipped: "cache", latest: state.version };
+  if (!force) {
+    if (state.checkedAt && now - state.checkedAt < CHECK_INTERVAL && state.version === currentVersion) {
+      return { skipped: "cache", latest: state.version };
+    }
+    // 上次检查失败：短退避后重试（失败不写 checkedAt，避免瞬时故障压制一天）
+    if (state.failedAt && now - state.failedAt < FAIL_BACKOFF) {
+      return { skipped: "backoff", reason: `上次检查失败（${state.lastError ?? "未知"}），稍后重试` };
+    }
   }
+  const lockPath = acquireUpdateLock(pluginRoot);
+  if (!lockPath) return { applied: false, reason: "另一会话正在更新，跳过" };
   let result;
   try {
-    result = await applyUpdate({ repo, pluginRoot, currentVersion, log });
-  } catch (err) {
-    try { writeFileSync(statePath, JSON.stringify({ version: currentVersion, checkedAt: now, lastError: String(err?.message ?? err) }) + "\n"); } catch {}
-    return { applied: false, reason: String(err?.message ?? err) };
+    try {
+      result = await applyUpdate({ repo, pluginRoot, currentVersion, log, deadline });
+    } catch (err) {
+      try { writeFileSync(statePath, JSON.stringify({ version: currentVersion, failedAt: Date.now(), lastError: String(err?.message ?? err) }) + "\n"); } catch {}
+      return { applied: false, reason: String(err?.message ?? err) };
+    }
+    try { writeFileSync(statePath, JSON.stringify({ version: result.version ?? currentVersion, checkedAt: Date.now() }) + "\n"); } catch {}
+    return result;
+  } finally {
+    rmSync(lockPath, { force: true });
   }
-  try {
-    writeFileSync(statePath, JSON.stringify({ version: result.version ?? currentVersion, checkedAt: now }) + "\n");
-  } catch {}
-  return result;
 }
 
 /** 读取更新状态（供注入配置 / sidecar /state 展示"已更新待生效"） */

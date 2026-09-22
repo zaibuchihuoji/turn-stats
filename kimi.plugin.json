@@ -1,8 +1,8 @@
 {
   "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
   "name": "turn-stats",
-  "version": "0.5.1",
-  "description": "在 Kimi Code Desktop 每轮回答下方显示本轮 token 消耗、耗时与生成速度（含子代理）。",
+  "version": "0.6.0",
+  "description": "在 Kimi Code Desktop 聊天区右侧固定悬浮条显示每轮 token 消耗、耗时与生成速度（含子代理）。",
   "keywords": [
     "token",
     "usage",
@@ -23,8 +23,8 @@
   ],
   "interface": {
     "displayName": "Turn Stats（回合统计）",
-    "shortDescription": "每轮回答下方显示 token 消耗 / 用时 / 生成速度",
-    "longDescription": "通过 SessionStart hook 注入渲染脚本并拉起本地统计服务：服务监听本地 server 落盘的事件日志（server/events/session_<id>.jsonl），按回合聚合 turn.step.completed 的真实 token 用量（输入含缓存拆解 / 输出）与服务器计时的回合时长、纯生成解码时间。每轮对话结束后在最后一轮回答下方插入统计行（耗时 / 输入 / 输出 / 生成 tok/s），悬停看缓存与首字延迟明细；Task 子代理的消耗归入当轮主回合。会话启动时自动检查并修复注入（应用更新后自动恢复）；支持 codeload 通道自更新。卸载：让 AI 执行插件 scripts/auto-patch.mjs --uninstall。",
+    "shortDescription": "聊天区右侧悬浮条显示每轮 token 消耗 / 用时 / 生成速度",
+    "longDescription": "通过 SessionStart hook 注入渲染脚本并拉起本地统计服务：sidecar 在统计脚本每次拉取时增量扫描本地 server 落盘的事件日志（server/events/session_<id>.jsonl，按 epoch+seq 去重防止重放重复计数与 epoch 轮换漏计），按回合聚合 turn.step.completed 的真实 token 用量（输入含缓存拆解 / 输出）与服务器计时的回合时长、纯生成解码时间。聊天区右侧固定悬浮条：模型干活时实时显示耗时与已产生 token，回合结束后显示最终统计（耗时 / 输入含缓存拆解 / 输出 / 纯生成 tok/s），悬停看缓存构成、首字延迟与结束原因；Task 子代理的消耗归入当轮主回合。只显示当前打开会话的统计（按页面 URL 会话 id 过滤）；统计服务不可达时保留最后数据并标注离线。会话启动时自动检查并修复注入（应用更新后自动恢复）；sidecar 空闲 30 分钟自退；--status 为只读诊断；支持 codeload 通道自更新（失败 1h 退避重试）。卸载：让 AI 执行插件 scripts/auto-patch.mjs --uninstall。",
     "developerName": "turn-stats"
   }
 }

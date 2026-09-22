@@ -11,6 +11,7 @@
  * 数据源：本地 sidecar 服务（hook 拉起，127.0.0.1 + token），聚合
  *   server/events/session_<id>.jsonl 的 turn.started/step.completed/ended 事件。
  * 只显示当前打开会话（按页面 URL 会话 id 过滤）。可关闭（记住偏好）。
+ * 服务不可达时不清空：保留最后成功的数据并标注「离线」，恢复后自动跟上。
  * 诊断：window.__turnStatsState。
  */
 (() => {
@@ -82,6 +83,8 @@
 .ts-chip .ts-k{opacity:.55;margin-right:3px}
 .ts-chip .ts-v{font-weight:600}
 .ts-chip .ts-live{color:var(--ts-accent,#4f8cff)}
+.ts-chip .ts-off{color:var(--ts-dim);font-weight:400}
+.ts-chip.ts-offline{opacity:.7}
 .ts-chip .ts-x{all:unset;cursor:pointer;opacity:.45;padding:0 2px;margin-left:2px;font-size:11px}
 .ts-chip .ts-x:hover{opacity:1}
 `;
@@ -135,18 +138,28 @@
     return s;
   }
 
-  function renderChip(state) {
+  function renderChip(state, offline) {
     if (sessionStorage.getItem(HIDE_KEY) === "1") { document.getElementById("turn-stats-chip")?.remove(); return; }
-    const sid = currentSessionId();
-    const mine = (state.turns ?? []).filter((t) => !sid || t.sessionId === sid);
-    const active = (state.active ?? []).filter((t) => !sid || t.sessionId === sid)
-      .sort((a, b) => b.startT - a.startT)[0];
     const chip = chipEl();
+    // 主题每次渲染跟随（应用内切换深浅色立即生效）；离线时整体调暗
+    chip.className = `ts-chip ${themeClass()}${offline ? " ts-offline" : ""}`;
 
     // 保留 ✕ 按钮，其余重建
     const x = chip.querySelector(".ts-x");
     chip.textContent = "";
     chip.appendChild(x);
+
+    // 定位不到会话 id（新建未保存的聊天、或 URL 结构变化）：严格不显示，
+    // 绝不回退到"全部会话"，否则会把别的会话的统计串到当前界面
+    const sid = currentSessionId();
+    if (!sid) {
+      chip.appendChild(span("", "暂无回合统计"));
+      chip.title = "打开一个已保存的会话后，这里显示该会话的回合统计";
+      return;
+    }
+
+    const active = (state?.active ?? []).filter((t) => t.sessionId === sid)
+      .sort((a, b) => b.startT - a.startT)[0];
 
     if (active) {
       // 模型干活中：实时统计
@@ -154,18 +167,22 @@
       chip.appendChild(span("输入", fmtTokens(active.in)));
       chip.appendChild(span("输出", fmtTokens(active.out), "ts-live"));
       chip.appendChild(span("", "统计中…", "ts-live"));
+      if (offline) chip.appendChild(span("", "离线", "ts-off"));
       chip.title = [
         `回合 #${active.turnId} 进行中（实时统计）`,
         `已产生输入 ${active.in.toLocaleString()} tok（含缓存读 ${active.cacheRead.toLocaleString()}）`,
         `已产生输出 ${active.out.toLocaleString()} tok`,
+        ...(offline ? ["统计服务暂不可达，以上为最后成功拉取的数据；重开会话可自动恢复"] : []),
       ].join("\n");
       return;
     }
 
-    const last = mine.sort((a, b) => b.endT - a.endT)[0];
+    const last = (state?.turns ?? []).filter((t) => t.sessionId === sid).sort((a, b) => b.endT - a.endT)[0];
     if (!last) {
-      chip.appendChild(span("", "暂无回合统计"));
-      chip.title = "发送一条消息后，这里会显示该轮的 token 消耗与耗时";
+      chip.appendChild(span("", offline ? "统计服务未连接" : "暂无回合统计"));
+      chip.title = offline
+        ? "统计服务不可达（重开会话会自动拉起；诊断见 window.__turnStatsState.lastError）"
+        : "发送一条消息后，这里会显示该轮的 token 消耗与耗时";
       return;
     }
     const speed = last.decodeMs > 300 ? Math.round(last.out / (last.decodeMs / 1000)) : 0;
@@ -174,66 +191,39 @@
     else chip.appendChild(span("输入", fmtTokens(last.in)));
     chip.appendChild(span("输出", fmtTokens(last.out)));
     if (speed > 0) chip.appendChild(span("生成", `${speed} tok/s`));
-    chip.title = [
-      `上一轮统计 · 会话 ${last.sessionId.slice(0, 26)}… · 回合 #${last.turnId}`,
-      `输入合计 ${last.in.toLocaleString()} tok = 新增 ${fmtTokens(last.in - last.cacheRead - last.cacheCreation)} + 缓存读 ${last.cacheRead.toLocaleString()} + 缓存创建 ${last.cacheCreation.toLocaleString()}`,
+    if (offline) chip.appendChild(span("", "离线", "ts-off"));
+    const tooltip = [
+      `上一轮统计 · 会话ID ${last.sessionId.slice(0, 26)}… · 回合 #${last.turnId}`,
+      `输入合计 ${last.in.toLocaleString()} tok = 新增 ${fmtTokens(last.in - last.cacheRead - last.cacheCreation)} + 缓存读 ${last.cacheRead.toLocaleString()} + 缓存创建 ${last.cacheCreation.toLocaleString()}（各步累加）`,
       `输出 ${last.out.toLocaleString()} tok · 纯答案解码 ${((last.decodeMs ?? 0) / 1000).toFixed(1)} 秒（速度不含思考，Kimi 事件不含思考 token 计数）`,
-      `结束原因 ${last.reason || "completed"}`,
-    ].join("\n");
+    ];
+    if (last.firstTokenMs > 0) tooltip.push(`首字延迟 ${((last.firstTokenMs ?? 0) / 1000).toFixed(2)} 秒`);
+    tooltip.push(`结束原因 ${last.reason || "completed"}`);
+    if (offline) tooltip.push("统计服务暂不可达，以上为最后成功拉取的数据；重开会话可自动恢复");
+    chip.title = tooltip.join("\n");
   }
-
-  // -------------------------------------------------------------------------
-  // 诊断上报：把消息区真实结构发给 sidecar（/diag），供锚点策略离线分析
-  // -------------------------------------------------------------------------
-  function reportDiag(state) {
-    if (reportDiag.at && Date.now() - reportDiag.at < 30000) return;   // 30s 一次
-    reportDiag.at = Date.now();
-    try {
-      const c = client;
-      if (!c.port) return;
-      const dump = (el) => ({
-        tag: el.tagName, cls: String(el.className).slice(0, 80),
-        turnId: el.dataset?.turnId ?? "",
-        text: (el.textContent ?? "").replace(/\s+/g, " ").slice(0, 40),
-        rect: (({ x, y, width, height }) => ({ x: Math.round(x), y: Math.round(y), w: Math.round(width), h: Math.round(height) }))(el.getBoundingClientRect()),
-      });
-      const payload = {
-        url: location.pathname,
-        sessionId: currentSessionId(),
-        candidates: [...document.querySelectorAll("[data-turn-id], .u-turn")].slice(0, 30).map(dump),
-        composer: (() => {
-          const pm = document.querySelector(".ProseMirror");
-          return pm ? dump(pm.closest('[class*="composer"]') ?? pm) : null;
-        })(),
-      };
-      fetch(`http://127.0.0.1:${c.port}/diag`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${c.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(3000),
-      }).catch(() => {});
-    } catch {}
-  }
-  reportDiag.at = 0;
 
   // -------------------------------------------------------------------------
   // 启动 + 诊断（window.__turnStatsState）
   // -------------------------------------------------------------------------
-  const diag = { bootAt: Date.now(), sidecar: "?", polled: 0, lastError: "", chip: false };
+  const diag = { bootAt: Date.now(), sidecar: "?", polled: 0, lastError: "", offline: false, chip: false };
+  let lastGood = null;   // 最后一次成功的 /state：离线时保留旧数据，不把悬浮条删成空白
 
   async function tick() {
     try {
       const state = await callState();
-      renderChip(state);
-      diag.sidecar = `v${state.version}`;
+      lastGood = state;
+      diag.offline = false;
       diag.lastError = "";
-      diag.chip = !!document.getElementById("turn-stats-chip");
-      reportDiag(state);
+      renderChip(state, false);
+      diag.sidecar = `v${state.version}`;
     } catch (e) {
       diag.lastError = String(e?.message ?? e);
-      document.getElementById("turn-stats-chip")?.remove();
+      diag.offline = true;
+      renderChip(lastGood, true);
     }
     diag.polled++;
+    diag.chip = !!document.getElementById("turn-stats-chip");
     try { window.__turnStatsState = { ...diag }; } catch {}
   }
 
