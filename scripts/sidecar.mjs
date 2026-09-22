@@ -62,29 +62,41 @@ function writeClientConfig() {
 }
 
 // --- 事件日志聚合 -------------------------------------------------------------
-// turns: Map<`${sessionId}|${turnId}`, turn>
-const turns = new Map();
-const fileOffsets = new Map();   // 文件路径 -> 已读字节
+// 回合粒度 = 主 agent（agentId "main"）的 turnId；Task 子代理（agent-N）的
+// turnId 独立编号且与 main 冲突，其消耗按发生时间归入当时进行中的主回合。
+const turns = new Map();         // `${sessionId}|main|${turnId}` -> main turn
+const subBuckets = new Map();    // `${sessionId}|${agentId}|${turnId}` -> 子代理独立桶（不外发）
+const currentMain = new Map();   // sessionId -> 进行中的主回合 key
+const fileOffsets = new Map();   // 文件路径 -> 已消费到的字节（按完整行推进）
 let filesScanned = 0;
 
-function ensureTurn(sessionId, turnId, time) {
-  const key = `${sessionId}|${turnId}`;
-  if (!turns.has(key)) {
-    turns.set(key, {
-      sessionId, turnId,
+function getBucket(map, key, time) {
+  if (!map.has(key)) {
+    map.set(key, {
+      sessionId: "", agentId: "", turnId: 0,
       startT: Number(time) || Date.now(),
       endT: 0, durationMs: 0, reason: "",
       in: 0, out: 0, cacheRead: 0, cacheCreation: 0,
       done: false,
     });
-    // 淘汰最旧的已完成回合
-    const done = [...turns.entries()].filter(([, t]) => t.done);
-    if (done.length > MAX_TURNS) {
-      done.sort((a, b) => a[1].endT - b[1].endT);
-      for (let i = 0; i < done.length - MAX_TURNS; i++) turns.delete(done[i][0]);
-    }
+    prune(map);
   }
-  return turns.get(key);
+  return map.get(key);
+}
+
+function prune(map) {
+  const done = [...map.entries()].filter(([, t]) => t.done);
+  if (done.length > MAX_TURNS * 2) {
+    done.sort((a, b) => a[1].endT - b[1].endT);
+    for (let i = 0; i < done.length - MAX_TURNS * 2; i++) map.delete(done[i][0]);
+  }
+}
+
+function addUsage(t, u) {
+  t.in += Number(u.inputOther ?? 0) + Number(u.inputCacheRead ?? 0) + Number(u.inputCacheCreation ?? 0);
+  t.out += Number(u.output ?? 0);
+  t.cacheRead += Number(u.inputCacheRead ?? 0);
+  t.cacheCreation += Number(u.inputCacheCreation ?? 0);
 }
 
 function processLine(line) {
@@ -95,22 +107,36 @@ function processLine(line) {
   const type = env.type ?? "";
   const p = env.payload ?? {};
   const sessionId = env.session_id ?? "";
+  const agentId = p.agentId ?? "main";
   const turnId = p.turnId;
   if (!sessionId || turnId === undefined) return;
-  const t = ensureTurn(sessionId, turnId, p.time);
+
+  const isMain = agentId === "main";
+  const key = `${sessionId}|${agentId}|${turnId}`;
+  const map = isMain ? turns : subBuckets;
+  const t = getBucket(map, key, p.time);
+  t.sessionId = sessionId; t.agentId = agentId; t.turnId = turnId;
+
   if (type === "turn.started") {
     t.startT = Number(p.time) || t.startT;
-  } else if (type === "turn.step.completed") {
-    const u = p.usage ?? {};
-    t.in += Number(u.inputOther ?? 0) + Number(u.inputCacheRead ?? 0) + Number(u.inputCacheCreation ?? 0);
-    t.out += Number(u.output ?? 0);
-    t.cacheRead += Number(u.inputCacheRead ?? 0);
-    t.cacheCreation += Number(u.inputCacheCreation ?? 0);
-  } else if (type === "turn.ended") {
+    if (isMain) currentMain.set(sessionId, key);
+    return;
+  }
+  if (type === "turn.step.completed") {
+    addUsage(t, p.usage ?? {});
+    // 子代理的消耗归入当时进行中的主回合
+    if (!isMain) {
+      const mk = currentMain.get(sessionId);
+      if (mk) addUsage(turns.get(mk), p.usage ?? {});
+    }
+    return;
+  }
+  if (type === "turn.ended") {
     t.endT = Number(p.time) || Date.now();
     t.durationMs = Number(p.durationMs ?? 0) || Math.max(0, t.endT - t.startT);
     t.reason = p.reason ?? "completed";
     t.done = true;
+    if (isMain && currentMain.get(sessionId) === key) currentMain.delete(sessionId);
   }
 }
 
@@ -123,7 +149,11 @@ function scanEvents() {
     let size = 0;
     try { size = statSync(fp).size; } catch { continue; }
     const off = fileOffsets.get(fp) ?? 0;
-    if (size <= off) continue;
+    if (size <= off) {
+      // 文件被截断/重写：offset 失效，从头读
+      if (size < off) fileOffsets.set(fp, 0);
+      continue;
+    }
     // 首次见到该文件：只读末尾 256KB（历史回合太多，回满会撑爆内存）
     const from = off === 0 ? Math.max(0, size - 256 * 1024) : off;
     let text = "";
@@ -135,10 +165,16 @@ function scanEvents() {
       closeSync(fd);
       text = buf.toString("utf8");
     } catch { continue; }
-    fileOffsets.set(fp, size);
-    const lines = text.split(/\r?\n/);
-    if (off === 0 && from > 0) lines.shift();   // 丢弃被截断的半行
-    for (const line of lines) processLine(line);
+    // 只消费完整行：最后一段可能是写了一半的行，留给下轮增量（否则事件永久丢失）
+    const lastNewline = text.lastIndexOf("\n");
+    if (lastNewline === -1) {
+      if (process.env.TURN_STATS_DEBUG) console.error(`[scan] ${basename(fp)}: 无完整行，等待`);
+      continue;
+    }
+    const complete = text.slice(0, lastNewline + 1);
+    fileOffsets.set(fp, from + Buffer.byteLength(complete, "utf8"));
+    if (process.env.TURN_STATS_DEBUG) console.error(`[scan] ${basename(fp)}: off=${off} from=${from} 消费 ${Buffer.byteLength(complete, "utf8")}B → offset=${fileOffsets.get(fp)}`);
+    for (const line of complete.split(/\r?\n/)) processLine(line);
   }
 }
 
@@ -147,6 +183,9 @@ function statePayload() {
   const list = [...turns.values()].filter((t) => t.done)
     .sort((a, b) => b.endT - a.endT)
     .slice(0, MAX_TURNS);
+  if (process.env.TURN_STATS_DEBUG) {
+    console.error(`[state] turns=${list.length} turnIds=${JSON.stringify(list.map((t) => t.turnId))} offsets=${JSON.stringify([...fileOffsets])} subdir=${JSON.stringify([...subBuckets.keys()].slice(0, 5))}`);
+  }
   return {
     ok: true, version: VERSION, turns: list,
     filesScanned, lastWorkspace,

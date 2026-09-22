@@ -21,21 +21,22 @@ const ev = (type, p, seq) => JSON.stringify({ kind: "event", seq, envelope: { ty
 let passed = 0;
 const assert = (c, m) => { if (!c) { console.error("FAIL: " + m); child.kill(); process.exit(1); } passed++; console.log("ok: " + m); };
 
-// 第一批事件：回合 0（2 个 step）+ 回合 1（1 个 step）
+// 第一批事件：回合 0（2 个 step + 子代理消耗归入）+ 回合 1（1 个 step）
 const batch1 = [
-  ev("turn.started", { time: 1000, turnId: 0, prompt: "测试一" }, 1),
-  ev("turn.step.completed", { time: 1500, turnId: 0, usage: { inputOther: 100, output: 200, inputCacheRead: 3000, inputCacheCreation: 10 } }, 2),
-  ev("turn.step.completed", { time: 2000, turnId: 0, usage: { inputOther: 50, output: 150, inputCacheRead: 1000, inputCacheCreation: 0 } }, 3),
-  ev("turn.ended", { time: 2600, turnId: 0, durationMs: 1600, reason: "completed" }, 4),
-  ev("turn.started", { time: 5000, turnId: 1, prompt: "测试二" }, 5),
-  ev("turn.step.completed", { time: 6000, turnId: 1, usage: { inputOther: 30, output: 40, inputCacheRead: 0, inputCacheCreation: 0 } }, 6),
-  ev("turn.ended", { time: 6500, turnId: 1, durationMs: 1500, reason: "completed" }, 7),
+  ev("turn.started", { time: 1000, turnId: 0, prompt: "测试一", agentId: "main" }, 1),
+  ev("turn.step.completed", { time: 1500, turnId: 0, agentId: "main", usage: { inputOther: 100, output: 200, inputCacheRead: 3000, inputCacheCreation: 10 } }, 2),
+  ev("turn.step.completed", { time: 1800, turnId: 0, agentId: "agent-0", usage: { inputOther: 500, output: 60, inputCacheRead: 0, inputCacheCreation: 0 } }, 3),
+  ev("turn.step.completed", { time: 2000, turnId: 0, agentId: "main", usage: { inputOther: 50, output: 150, inputCacheRead: 1000, inputCacheCreation: 0 } }, 4),
+  ev("turn.ended", { time: 2600, turnId: 0, agentId: "main", durationMs: 1600, reason: "completed" }, 5),
+  ev("turn.started", { time: 5000, turnId: 1, agentId: "main", prompt: "测试二" }, 6),
+  ev("turn.step.completed", { time: 6000, turnId: 1, agentId: "main", usage: { inputOther: 30, output: 40, inputCacheRead: 0, inputCacheCreation: 0 } }, 7),
+  ev("turn.ended", { time: 6500, turnId: 1, agentId: "main", durationMs: 1500, reason: "completed" }, 8),
 ];
 writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.join("\n") + "\n");
 
 const child = spawn(process.execPath, [join(HERE, "..", "scripts", "sidecar.mjs")], {
-  env: { ...process.env, KIMI_CODE_HOME: home, TURN_STATS_ASSETS: assets },
-  stdio: "ignore",
+  env: { ...process.env, KIMI_CODE_HOME: home, TURN_STATS_ASSETS: assets, TURN_STATS_DEBUG: "1" },
+  stdio: ["ignore", "inherit", "inherit"],
 });
 
 const cfgPath = join(assets, "turn-stats.config.json");
@@ -49,23 +50,32 @@ const H = { Authorization: `Bearer ${cfg.token}` };
 const base = `http://127.0.0.1:${cfg.port}`;
 
 let st = await (await fetch(`${base}/state`, { headers: H })).json();
-assert(st.ok && st.turns.length === 2, `两个回合聚合（${st.turns.length}）`);
+assert(st.ok && st.turns.length === 2, `两个主回合聚合（${st.turns.length}）`);
 const t0 = st.turns.find((t) => t.turnId === 0);
-assert(t0.in === 100 + 3000 + 10 + 50 + 1000, `回合 0 输入含缓存聚合（${t0.in}）`);
-assert(t0.out === 350, `回合 0 输出聚合（${t0.out}）`);
+assert(t0.in === 100 + 3000 + 10 + 50 + 1000 + 500, `回合 0 输入含缓存与子代理归入（${t0.in}）`);
+assert(t0.out === 200 + 150 + 60, `回合 0 输出含子代理（${t0.out}）`);
 assert(t0.durationMs === 1600, "时长用服务端 turn.ended 值");
-assert(st.turns[0].turnId === 1 || st.turns[0].turnId === 0, "回合列表返回");
+assert(!st.turns.some((t) => t.agentId && t.agentId !== "main"), "子代理独立桶不外发");
 
-// 增量追加：回合 2
+// 增量追加：回合 2 + 一个写一半的 turn.ended 残行（下轮补全后应恰好计一次）
 const batch2 = [
-  ev("turn.started", { time: 9000, turnId: 2, prompt: "测试三" }, 8),
-  ev("turn.step.completed", { time: 9500, turnId: 2, usage: { inputOther: 7, output: 8, inputCacheRead: 0, inputCacheCreation: 0 } }, 9),
-  ev("turn.ended", { time: 9800, turnId: 2, durationMs: 800, reason: "completed" }, 10),
+  ev("turn.started", { time: 9000, turnId: 2, agentId: "main", prompt: "测试三" }, 8),
+  ev("turn.step.completed", { time: 9500, turnId: 2, agentId: "main", usage: { inputOther: 7, output: 8, inputCacheRead: 0, inputCacheCreation: 0 } }, 9),
+  ev("turn.ended", { time: 9800, turnId: 2, agentId: "main", durationMs: 800, reason: "completed" }, 10),
 ];
-writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.concat(batch2).join("\n") + "\n");
+const fullLine3 = ev("turn.ended", { time: 9900, turnId: 3, agentId: "main", durationMs: 900, reason: "completed" }, 11);
+const partial = fullLine3.slice(0, fullLine3.lastIndexOf('"re') + 3);   // 截断到 "re 处
+writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.concat(batch2).join("\n") + "\n" + partial);
 await new Promise((r) => setTimeout(r, 2500));
 st = await (await fetch(`${base}/state`, { headers: H })).json();
 assert(st.turns.some((t) => t.turnId === 2), "增量事件被拾取");
+assert(!st.turns.some((t) => t.turnId === 11 || t.startT === 99), "残行未被当成事件");
+
+// 残行补全（真实场景事件行总带结尾换行）
+writeFileSync(join(eventsDir, `session_${SID}.jsonl`), batch1.concat(batch2).join("\n") + "\n" + fullLine3 + "\n");
+await new Promise((r) => setTimeout(r, 2500));
+st = await (await fetch(`${base}/state`, { headers: H })).json();
+assert(st.turns.some((t) => t.turnId === 3), `补全后的残行被正确消费且只计一次（实际: ${JSON.stringify(st.turns.map((t) => [t.turnId, t.agentId, t.done]))}）`);
 
 const anon = await fetch(`${base}/state`);
 assert(anon.status === 401, "无 token 401");

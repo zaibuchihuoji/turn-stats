@@ -1,0 +1,6 @@
+{"kind":"event","seq":1,"envelope":{"type":"turn.started","session_id":"session_abc","seq":1,"payload":{"time":1000,"turnId":0,"prompt":"t1","agentId":"main"}}}
+{"kind":"event","seq":2,"envelope":{"type":"turn.step.completed","session_id":"session_abc","seq":2,"payload":{"time":1500,"turnId":0,"agentId":"main","usage":{"inputOther":100,"output":200,"inputCacheRead":3000,"inputCacheCreation":10}}}}
+{"kind":"event","seq":3,"envelope":{"type":"turn.ended","session_id":"session_abc","seq":3,"payload":{"time":2600,"turnId":0,"agentId":"main","durationMs":1600,"reason":"completed"}}}
+{"kind":"event","seq":8,"envelope":{"type":"turn.started","session_id":"session_abc","seq":8,"payload":{"time":9000,"turnId":2,"agentId":"main","prompt":"t3"}}}
+{"kind":"event","seq":9,"envelope":{"type":"turn.ended","session_id":"session_abc","seq":9,"payload":{"time":9800,"turnId":2,"agentId":"main","durationMs":800,"reason":"completed"}}}
+{"kind":"event","seq":11,"envelope":{"type":"turn.ended","session_id":"session_abc","seq":11,"payload":{"time":9900,"turnId":3,"agentId":"main","durationMs":900,"reason":"completed"}}}
