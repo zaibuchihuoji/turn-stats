@@ -2,118 +2,135 @@
  * turn-stats renderer runtime
  * 由 scripts/auto-patch.mjs 生成并注入 Kimi Code Desktop 的 desktop-dist/index.html。
  *
- * 功能：每轮对话结束（busy/main_turn_active → 双双转 false）后，在最后一轮回答
- * 下方插入一行小字：本轮耗时、token 消耗（输入/输出/缓存/费用）与生成速度。
+ * 数据通道：本地 server 的 WebSocket（/api/v1/ws?client_id=…，localhost 免鉴权）。
+ * 订阅会话后服务器实时推送回合事件：
+ *   turn.started          {turnId, time, prompt}
+ *   turn.step.completed   {turnId, usage:{inputOther, output, inputCacheRead, inputCacheCreation}}
+ *   turn.ended            {turnId, durationMs, reason}   ← 服务器算好的回合时长
+ * 一轮可能包含多个 step，统计行聚合该 turnId 的全部 step usage。
  *
- * 数据源（全部来自本地 server，凭据复用宿主 SPA 的 sessionStorage）：
- *  - GET /api/v1/sessions        会话列表：busy / main_turn_active / usage（累计值）
- *  - usage 字段（snake_case）：input_tokens / output_tokens / cache_read_tokens /
- *    cache_creation_tokens / total_cost_usd / context_tokens / context_limit / turn_count
- *  - 回合消耗 = 回合结束快照 - 回合开始快照（累计值差值），结束前延迟重取一次，
- *    拿最终落盘的 usage（避免最后一段流式 token 没算进来）
- *
- * DOM 锚点：消息区每轮是 [data-turn-id] 元素（逆向自宿主 SPA），统计行 append 在
- * 最后一轮元素内部；宿主重渲染后由 2s 重挂载循环补挂。找不到锚点时该轮统计仅
- * 保存在内存，不阻塞任何功能。
+ * 渲染：在消息区最后一个 [data-turn-id] 元素内插入统计行；宿主重渲染后 2s 补挂。
+ * 会话发现：每 15s 轮询 /api/v1/sessions，对新出现的会话补发订阅。
+ * 诊断：window.__turnStatsState 随时可查运行状态。
  */
 (() => {
   if (window.__turnStatsInstalled) return;
   window.__turnStatsInstalled = true;
 
-  const POLL_MS = 2000;            // 会话状态轮询
-  const SETTLE_MS = 1200;          // 回合结束后等 usage 落盘再取终值
-  const ATTACH_RETRY_MS = 2000;    // 统计行重挂载检查
-  const ATTACH_TTL = 10 * 60000;   // 统计行重挂载放弃时限
-  const FETCH_TIMEOUT = 6000;
+  const SESSIONS_POLL_MS = 15000;
+  const ATTACH_RETRY_MS = 2000;
+  const ATTACH_TTL = 10 * 60000;
+  const WS_RETRY_MIN = 2000;
+  const WS_RETRY_MAX = 30000;
 
   // -------------------------------------------------------------------------
-  // 宿主凭据（app:// 页面 → 本地 server）
+  // 连接参数（app:// 页面 → 本地 server）
   // -------------------------------------------------------------------------
-  function kimiRuntime() {
-    let origin = null, token = null;
-    try {
-      origin = sessionStorage.getItem("kimi-desktop-server-origin");
-      const raw = sessionStorage.getItem("kimi-web.server-credential");
-      if (raw) token = JSON.parse(raw)?.credential ?? null;
-    } catch {}
-    return { origin, token };
-  }
-
-  async function fetchSessions() {
-    const { origin, token } = kimiRuntime();
-    if (!origin) throw new Error("server origin 未知");
-    const res = await fetch(`${origin}/api/v1/sessions?limit=20`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
-    return body?.data?.items ?? [];
+  function serverOrigin() {
+    try { return sessionStorage.getItem("kimi-desktop-server-origin"); } catch { return null; }
   }
 
   // -------------------------------------------------------------------------
-  // 回合计数：busy 开始记快照，busy+mainTurnActive 双双转 false 判定结束
+  // 状态
   // -------------------------------------------------------------------------
-  const watchers = new Map();   // sessionId -> {startT, startUsage, lastUsage, wasBusy, joinedMid}
-  const records = [];           // 已结束回合 {key, sessionId, title, startT, endT, delta, joinedMid, attached}
+  let ws = null;
+  let wsRetryDelay = WS_RETRY_MIN;
+  let wsConnectedAt = 0;
+  let wsMsgCount = 0;
+  let lastWsError = "";
+  const subscribed = new Set();   // 已订阅 session id
+  const turns = new Map();        // `${sessionId}|${turnId}` -> {startT, prompt, in, out, cacheRead, cacheCreation, sessionId}
+  const records = [];             // 已完成回合，待渲染
 
-  function num(u, k) { return Number(u?.[k] ?? 0) || 0; }
-
-  function deltaUsage(a, b) {
-    const keys = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "turn_count"];
-    const d = {};
-    for (const k of keys) d[k] = num(b, k) - num(a, k);
-    d.total_cost_usd = num(b, "total_cost_usd") - num(a, "total_cost_usd");
-    return d;
+  // -------------------------------------------------------------------------
+  // WebSocket
+  // -------------------------------------------------------------------------
+  function connectWs() {
+    const origin = serverOrigin();
+    if (!origin || (ws && ws.readyState <= 1)) return;
+    const url = origin.replace(/^http/, "ws") + "/api/v1/ws?client_id=turn-stats-" + Date.now();
+    try { ws = new WebSocket(url); } catch (e) { scheduleReconnect(); return; }
+    ws.onopen = () => {
+      wsConnectedAt = Date.now();
+      wsRetryDelay = WS_RETRY_MIN;
+      for (const sid of subscribed) sendSubscribe(sid);
+    };
+    ws.onmessage = (ev) => {
+      wsMsgCount++;
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      handleEvent(m);
+    };
+    ws.onclose = () => { ws = null; scheduleReconnect(); };
+    ws.onerror = () => { lastWsError = "ws error " + new Date().toLocaleTimeString(); };
   }
 
-  async function pollOnce() {
-    const items = await fetchSessions();
-    const runningIds = new Set();
-    for (const s of items) {
-      const busy = !!(s.busy || s.main_turn_active);
-      if (!busy) continue;
-      runningIds.add(s.id);
-      const w = watchers.get(s.id);
-      if (!w) {
-        // 首次见到 busy：若该会话 usage 的 turn_count 之前没见过，视为中途加入
-        // （无从得知回合起点），统计值只覆盖观察窗口
-        watchers.set(s.id, {
-          startT: Date.now(), startUsage: s.usage ?? {}, lastUsage: s.usage ?? {},
-          wasBusy: true, joinedMid: true, title: s.title ?? "",
-        });
-      } else {
-        w.wasBusy = true;
-        w.lastUsage = s.usage ?? w.lastUsage;
-      }
+  function scheduleReconnect() {
+    setTimeout(connectWs, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 2, WS_RETRY_MAX);
+  }
+
+  function sendSubscribe(sessionId) {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: "subscribe_v2", id: Date.now(), payload: { session_id: sessionId } }));
+  }
+
+  function handleEvent(m) {
+    const env = m.envelope ?? m;
+    const type = env.type ?? m.type ?? "";
+    const payload = env.payload ?? m.payload ?? {};
+    const sessionId = env.session_id ?? m.session_id ?? "";
+    if (type === "turn.started") {
+      turns.set(`${sessionId}|${payload.turnId}`, {
+        startT: payload.time ?? Date.now(), prompt: payload.prompt ?? "",
+        in: 0, out: 0, cacheRead: 0, cacheCreation: 0, sessionId,
+      });
+      return;
     }
-    // 不再 busy 的 watcher → 回合结束
-    for (const [id, w] of [...watchers]) {
-      if (runningIds.has(id)) continue;
-      watchers.delete(id);
-      if (!w.wasBusy) continue;
-      finalizeTurn(id, w, Date.now());
+    if (type === "turn.step.completed") {
+      const key = `${sessionId}|${payload.turnId}`;
+      const t = turns.get(key);
+      if (!t) return;
+      const u = payload.usage ?? {};
+      t.in += Number(u.inputOther ?? 0) + Number(u.inputCacheRead ?? 0) + Number(u.inputCacheCreation ?? 0);
+      t.out += Number(u.output ?? 0);
+      t.cacheRead += Number(u.inputCacheRead ?? 0);
+      t.cacheCreation += Number(u.inputCacheCreation ?? 0);
+      return;
     }
-  }
-
-  async function finalizeTurn(sessionId, w, endDetectedT) {
-    const key = `${sessionId}#${Date.now()}`;
-    // 延迟取终值：流式收尾的 usage 常在状态翻转后一瞬才落盘。
-    // 耗时按"检测到结束"的时刻算，不含这段结算延迟
-    setTimeout(async () => {
-      let endUsage = w.lastUsage;
-      try {
-        const items = await fetchSessions();
-        const s = items.find((x) => x.id === sessionId);
-        if (s?.usage) endUsage = s.usage;
-      } catch {}
+    if (type === "turn.ended") {
+      const key = `${sessionId}|${payload.turnId}`;
+      const t = turns.get(key);
+      turns.delete(key);
+      if (!t) return;
       records.push({
-        key, sessionId, title: w.title, startT: w.startT, endT: endDetectedT,
-        delta: deltaUsage(w.startUsage, endUsage), joinedMid: w.joinedMid, attached: null,
+        key: `${sessionId}#${payload.turnId}#${payload.time ?? Date.now()}`,
+        sessionId, title: "", startT: t.startT,
+        endT: (payload.time ?? Date.now()),
+        durationMs: Number(payload.durationMs ?? 0) || (payload.time ?? Date.now()) - t.startT,
+        in: t.in, out: t.out, cacheRead: t.cacheRead, cacheCreation: t.cacheCreation,
+        joinedMid: false, attached: null,
       });
       if (records.length > 40) records.shift();
       attachStats();
-    }, SETTLE_MS);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 会话发现：新会话补订阅
+  // -------------------------------------------------------------------------
+  async function pollSessions() {
+    const origin = serverOrigin();
+    if (!origin) return;
+    const res = await fetch(`${origin}/api/v1/sessions?limit=20`, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return;
+    const body = await res.json();
+    for (const s of body?.data?.items ?? []) {
+      if (s.id && !subscribed.has(s.id)) {
+        subscribed.add(s.id);
+        sendSubscribe(s.id);
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -150,16 +167,7 @@
     return String(Math.round(n));
   }
 
-  function fmtCost(usd) {
-    if (usd >= 0.01) return `$${usd.toFixed(3)}`;
-    if (usd > 0) return `$${usd.toFixed(4)}`;
-    return "";
-  }
-
   function buildLine(r) {
-    const d = r.delta;
-    const ms = r.endT - r.startT;
-    const speed = ms > 500 ? d.output_tokens / (ms / 1000) : 0;
     const line = document.createElement("div");
     line.className = `ts-line ${themeClass()}`;
     line.dataset.tsKey = r.key;
@@ -170,18 +178,16 @@
       span.append(kEl, vEl);
       line.appendChild(span);
     };
-    put("耗时", (r.joinedMid ? "≈" : "") + fmtDuration(ms));
-    put("输入", fmtTokens(d.input_tokens));
-    put("输出", fmtTokens(d.output_tokens));
+    const speed = r.durationMs > 500 ? r.out / (r.durationMs / 1000) : 0;
+    put("耗时", fmtDuration(r.durationMs));
+    put("输入", fmtTokens(r.in));
+    put("输出", fmtTokens(r.out));
     if (speed > 0) put("速度", `${Math.round(speed)} tok/s`);
-    const cost = fmtCost(d.total_cost_usd);
-    if (cost) put("费用", cost);
     line.title = [
-      `本轮输入 ${d.input_tokens.toLocaleString()} tok（含缓存读 ${d.cache_read_tokens.toLocaleString()}）`,
-      `本轮输出 ${d.output_tokens.toLocaleString()} tok（缓存创建 ${d.cache_creation_tokens.toLocaleString()}）`,
-      `回合数 +${d.turn_count} · 会话：${r.title || r.sessionId}`,
-      r.joinedMid ? "注意：插件在回合中途才开始观察，数值只覆盖观察窗口" : "",
-    ].filter(Boolean).join("\n");
+      `本轮输入 ${r.in.toLocaleString()} tok（其中缓存读 ${r.cacheRead.toLocaleString()} / 缓存创建 ${r.cacheCreation.toLocaleString()}）`,
+      `本轮输出 ${r.out.toLocaleString()} tok`,
+      `会话：${r.sessionId.slice(0, 20)}…`,
+    ].join("\n");
     return line;
   }
 
@@ -191,6 +197,8 @@
   }
 
   function attachStats() {
+    if (!records.length) return;
+    ensureStyle();
     const turns = turnCandidates();
     if (!turns.length) return;
     const now = Date.now();
@@ -202,56 +210,61 @@
       const idx = turns.length - 1 - (records.length - 1 - i);
       if (idx < 0) break;
       const turnEl = turns[idx];
-      if (turnEl.querySelector(`.ts-line[data-ts-key="${CSS.escape(r.key)}"]`)) { r.attached = now; continue; }
-      // 该回合元素已挂了统计行（含其他记录），不再叠加
-      if (turnEl.querySelector(".ts-line")) continue;
+      let already = false, occupied = false;
+      for (const el of turnEl.querySelectorAll(".ts-line")) {
+        if (el.dataset.tsKey === r.key) already = true;
+        occupied = true;
+      }
+      if (already) { r.attached = now; continue; }
+      if (occupied) continue;
       try {
         turnEl.appendChild(buildLine(r));
         r.attached = now;
       } catch {}
     }
-    if (!document.getElementById("turn-stats-style")) {
-      try {
-        const style = document.createElement("style");
-        style.id = "turn-stats-style";
-        style.textContent = CSS;
-        document.head.appendChild(style);
-      } catch {}
-    }
+  }
+
+  function ensureStyle() {
+    if (document.getElementById("turn-stats-style")) return;
+    try {
+      const style = document.createElement("style");
+      style.id = "turn-stats-style";
+      style.textContent = CSS;
+      document.head.appendChild(style);
+    } catch {}
   }
 
   // -------------------------------------------------------------------------
-  // 启动
+  // 启动 + 诊断（window.__turnStatsState 随时可查）
   // -------------------------------------------------------------------------
-  const diag = { bootAt: Date.now(), lastPollAt: 0, lastError: "", lastItems: 0,
-    runningIds: [], watchersCount: 0, recordsCount: 0, lastTurnElements: 0, polls: 0 };
+  const diag = { bootAt: Date.now(), ws: "connecting", wsMessages: 0, subscribedCount: 0,
+    activeTurns: 0, recordsCount: 0, lastTurnElements: 0, lastError: "" };
 
-  async function tick() {
-    try {
-      await pollOnce();
-      diag.lastError = "";
-    } catch (e) {
-      diag.lastError = String(e?.message ?? e);
-    }
-    diag.lastPollAt = Date.now();
-    diag.polls++;
-    diag.runningIds = [...watchers.keys()];
-    diag.watchersCount = watchers.size;
+  function updateDiag() {
+    diag.ws = ws ? (ws.readyState === 1 ? "connected" : "connecting") : "disconnected";
+    diag.wsMessages = wsMsgCount;
+    diag.subscribedCount = subscribed.size;
+    diag.activeTurns = turns.size;
     diag.recordsCount = records.length;
     diag.lastTurnElements = turnCandidates().length;
-    try { window.__turnStatsState = { ...diag, watchers: [...watchers.keys()], records: records.map((r) => ({ key: r.key, endT: r.endT, attached: !!r.attached, out: r.delta?.output_tokens })) }; } catch {}
+    try { window.__turnStatsState = { ...diag, records: records.slice(-3).map((r) => ({ endT: r.endT, attached: !!r.attached, in: r.in, out: r.out, ms: r.durationMs })) }; } catch {}
+  }
+
+  function tick() {
+    try {
+      connectWs();
+      pollSessions().catch((e) => { diag.lastError = String(e?.message ?? e); });
+    } catch (e) { diag.lastError = String(e?.message ?? e); }
+    updateDiag();
     attachStats();
   }
 
   function boot() {
-    try {
-      const style = document.createElement("style");
-      style.textContent = CSS;
-      style.id = "turn-stats-style";
-      document.head.appendChild(style);
-    } catch {}
-    console.info("[turn-stats] runtime loaded, polling every", POLL_MS, "ms");
-    setInterval(tick, POLL_MS);
+    ensureStyle();
+    console.info("[turn-stats] runtime loaded (ws mode)");
+    setInterval(tick, SESSIONS_POLL_MS);
+    setInterval(updateDiag, ATTACH_RETRY_MS);
+    setInterval(attachStats, ATTACH_RETRY_MS);
     addEventListener("focus", tick);
     addEventListener("online", tick);
     tick();
