@@ -223,8 +223,23 @@
   // -------------------------------------------------------------------------
   // 启动
   // -------------------------------------------------------------------------
+  const diag = { bootAt: Date.now(), lastPollAt: 0, lastError: "", lastItems: 0,
+    runningIds: [], watchersCount: 0, recordsCount: 0, lastTurnElements: 0, polls: 0 };
+
   async function tick() {
-    try { await pollOnce(); } catch {}
+    try {
+      await pollOnce();
+      diag.lastError = "";
+    } catch (e) {
+      diag.lastError = String(e?.message ?? e);
+    }
+    diag.lastPollAt = Date.now();
+    diag.polls++;
+    diag.runningIds = [...watchers.keys()];
+    diag.watchersCount = watchers.size;
+    diag.recordsCount = records.length;
+    diag.lastTurnElements = turnCandidates().length;
+    try { window.__turnStatsState = { ...diag, watchers: [...watchers.keys()], records: records.map((r) => ({ key: r.key, endT: r.endT, attached: !!r.attached, out: r.delta?.output_tokens })) }; } catch {}
     attachStats();
   }
 
@@ -235,6 +250,7 @@
       style.id = "turn-stats-style";
       document.head.appendChild(style);
     } catch {}
+    console.info("[turn-stats] runtime loaded, polling every", POLL_MS, "ms");
     setInterval(tick, POLL_MS);
     addEventListener("focus", tick);
     addEventListener("online", tick);
