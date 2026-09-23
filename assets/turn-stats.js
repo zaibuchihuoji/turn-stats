@@ -129,6 +129,32 @@
     return chip;
   }
 
+  // 贴着输入框的上边缘、两侧与输入框对齐（同宽）；找不到输入框时退回右侧上部。
+  // 只读 DOM 位置，不插入消息流（v0.4.x 教训是往里插节点，读 rect 没有副作用）。
+  // 候选可能有多个（隐藏的 contenteditable、侧栏搜索框等）：取最底部且足够宽的那个
+  function findComposerRect() {
+    const cands = [...document.querySelectorAll('.ProseMirror, [contenteditable=true], textarea, [aria-label*="输入"]')]
+      .map((el) => el.getBoundingClientRect())
+      .filter((r) => r.width > 100 && r.top > 60);
+    if (!cands.length) return null;
+    return cands.reduce((a, b) => (b.top > a.top ? b : a));
+  }
+
+  function positionChip() {
+    const chip = document.getElementById("turn-stats-chip");
+    if (!chip) return;
+    const r = findComposerRect();
+    if (r) {
+      chip.style.left = Math.round(r.left) + "px";
+      chip.style.right = Math.max(12, Math.round(window.innerWidth - r.right)) + "px";
+      chip.style.top = Math.max(8, Math.round(r.top - chip.offsetHeight - 6)) + "px";
+      return;
+    }
+    chip.style.left = "";
+    chip.style.top = "20%";   // 回退位置故意区别于正常位：肉眼可判"输入框没找到"
+    chip.style.right = "18px";
+  }
+
   function span(k, v, cls) {
     const s = document.createElement("span");
     if (cls) s.className = cls;
@@ -224,6 +250,7 @@
     }
     diag.polled++;
     diag.chip = !!document.getElementById("turn-stats-chip");
+    positionChip();
     try { window.__turnStatsState = { ...diag }; } catch {}
   }
 

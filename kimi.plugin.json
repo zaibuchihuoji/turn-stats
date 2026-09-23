@@ -1,8 +1,8 @@
 {
   "$schema": "https://kimi.com/schemas/kimi.plugin.schema.json",
   "name": "turn-stats",
-  "version": "0.6.3",
-  "description": "在 Kimi Code Desktop 聊天区右侧固定悬浮条显示每轮 token 消耗、耗时与生成速度（含子代理）。",
+  "version": "0.6.6",
+  "description": "在 Kimi Code Desktop 输入框上方显示悬浮条：每轮 token 消耗、耗时与生成速度（两侧与输入框对齐，含子代理）。",
   "keywords": [
     "token",
     "usage",

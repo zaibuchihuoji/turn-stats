@@ -1,7 +1,7 @@
 # turn-stats — Kimi Code Desktop 回合统计
 
 模型每轮干完活，统计这一轮消耗了多少 token、用了多久、生成多快。
-展示为聊天区右侧的**固定悬浮条**（不插消息流，不受界面重渲染影响）：
+展示为输入框上方的**悬浮条**（两侧与输入框对齐，不插消息流，不受界面重渲染影响）：
 
 ```
 模型干活中： 耗时 12 秒 · 输入 1.2k · 输出 340 · 统计中…
@@ -49,7 +49,7 @@ https://github.com/zaibuchihuoji/turn-stats
 github.com 直连超时的话填 codeload 直链（固定版本）：
 
 ```
-https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.3
+https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.6
 ```
 
 装完**重启 Kimi Code Desktop** + 开新会话生效。
