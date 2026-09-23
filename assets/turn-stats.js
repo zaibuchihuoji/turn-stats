@@ -143,13 +143,14 @@
 
   // 贴着输入框的上边缘、两侧与输入框对齐（同宽）；找不到输入框时退回右侧上部。
   // 只读 DOM 位置，不插入消息流（v0.4.x 教训是往里插节点，读 rect 没有副作用）。
-  // 候选可能有多个（隐藏的 contenteditable、侧栏搜索框等）：取最底部且足够宽的那个
-  function findComposerRect() {
+  // 候选可能有多个（隐藏的 contenteditable、侧栏搜索框等）：取最底部且足够宽的那个。
+  // 返回元素本身而非 rect——定位（左右缘）与找上边缘（composerTopEdge）必须用
+  // 同一个候选，否则两套 querySelector 各选各的，悬浮条会贴错对象
+  function findComposerEl() {
     const cands = [...document.querySelectorAll('.ProseMirror, [contenteditable=true], textarea, [aria-label*="输入"]')]
-      .map((el) => el.getBoundingClientRect())
-      .filter((r) => r.width > 100 && r.top > 60);
+      .filter((el) => { const r = el.getBoundingClientRect(); return r.width > 100 && r.top > 60; });
     if (!cands.length) return null;
-    return cands.reduce((a, b) => (b.top > a.top ? b : a));
+    return cands.reduce((a, b) => (b.getBoundingClientRect().top > a.getBoundingClientRect().top ? b : a));
   }
 
   // 输入框可视容器（圆角描边那层）的上边缘：从编辑器向上找第一个带明显
@@ -171,10 +172,10 @@
   function positionChip() {
     const chip = document.getElementById("turn-stats-chip");
     if (!chip) return;
-    const r = findComposerRect();
-    if (r) {
-      const composer = document.querySelector('.ProseMirror, [contenteditable=true], textarea, [aria-label*="输入"]');
-      const edge = composer ? composerTopEdge(composer) : null;
+    const composer = findComposerEl();
+    if (composer) {
+      const r = composer.getBoundingClientRect();   // 与 composerTopEdge 同一元素，永不错位
+      const edge = composerTopEdge(composer);
       // 找到容器边缘→紧贴（2px）；没找到→退离编辑器顶 24px，宁可浮空也不遮挡
       const anchorTop = edge ?? r.top;
       const gap = edge !== null ? 2 : 24;

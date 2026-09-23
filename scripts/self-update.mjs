@@ -1,5 +1,5 @@
 /**
- * self-update —— 插件自更新（codeload 直连通道；两插件共用同一实现，各自持有一份）
+ * self-update —— 插件自更新（codeload 直连通道；三插件共用同一实现，各自持有一份）
  *
  * 设计原则：
  *  - 只依赖 codeload.github.com（国内直连可达，与引擎安装插件是同一通道）；

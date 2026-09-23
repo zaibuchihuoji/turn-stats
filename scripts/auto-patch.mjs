@@ -131,7 +131,8 @@ function injectUI(dist) {
   const patched = html.includes(SCRIPT_NAME);
   const stale = !existsSync(runtimePath) || !readFileSync(runtimePath, "utf8").includes(`turn-stats@${VERSION}`);
   if (patched && !stale && !has("--force")) return false;
-  writeFileSync(runtimePath, `/* turn-stats@${VERSION} */\n` + template, "utf8");
+  // 原子写：多窗口同时开会话（两个 hook 并发跑）时，app:// 实时读盘可能读到半截脚本
+  writeAtomic(runtimePath, `/* turn-stats@${VERSION} */\n` + template);
   // 始终重写标签：升级时 ?v= 随之变化，绕过 app:// 的脚本缓存
   patchHtml(indexPath);
   return true;
