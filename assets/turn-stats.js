@@ -68,24 +68,24 @@
   // 渲染
   // -------------------------------------------------------------------------
   const CSS = `
-.ts-scope{--ts-fg:#c9c9d1;--ts-dim:rgba(201,201,209,.55);--ts-border:rgba(255,255,255,.14);
-  --ts-bg:rgba(30,30,34,.92);--ts-card:rgba(255,255,255,.06)}
-.ts-scope.light{--ts-fg:#3d3d46;--ts-dim:rgba(61,61,70,.55);--ts-border:rgba(0,0,0,.14);
-  --ts-bg:rgba(255,255,255,.94);--ts-card:rgba(0,0,0,.05)}
+.ts-scope{--ts-fg:#e8eaf2;--ts-dim:rgba(232,234,242,.6);--ts-border:rgba(96,140,255,.5);
+  --ts-bg:rgba(20,22,30,.97);--ts-card:rgba(255,255,255,.08)}
+.ts-scope.light{--ts-fg:#26282f;--ts-dim:rgba(38,40,47,.6);--ts-border:rgba(47,84,235,.45);
+  --ts-bg:rgba(255,255,255,.98);--ts-card:rgba(0,0,0,.05)}
 @media (prefers-color-scheme: light){.ts-scope:not(.dark):not(.light){
-  --ts-fg:#3d3d46;--ts-dim:rgba(61,61,70,.55);--ts-border:rgba(0,0,0,.14);
-  --ts-bg:rgba(255,255,255,.94);--ts-card:rgba(0,0,0,.05)}}
+  --ts-fg:#26282f;--ts-dim:rgba(38,40,47,.6);--ts-border:rgba(47,84,235,.45);
+  --ts-bg:rgba(255,255,255,.98);--ts-card:rgba(0,0,0,.05)}}
 .ts-chip{position:fixed;right:18px;top:38%;z-index:2147483000;display:flex;gap:4px 10px;
-  align-items:baseline;padding:6px 12px;border-radius:10px;border:1px solid var(--ts-border);
-  background:var(--ts-bg);color:var(--ts-fg);font-size:11px;line-height:1.5;
-  box-shadow:0 4px 16px rgba(0,0,0,.25);user-select:text;font-variant-numeric:tabular-nums;
-  backdrop-filter:blur(8px)}
-.ts-chip .ts-k{opacity:.55;margin-right:3px}
-.ts-chip .ts-v{font-weight:600}
-.ts-chip .ts-live{color:var(--ts-accent,#4f8cff)}
+  align-items:baseline;padding:7px 13px;border-radius:10px;border:1px solid var(--ts-border);
+  background:var(--ts-bg);color:var(--ts-fg);font-size:12px;line-height:1.5;
+  box-shadow:0 6px 24px rgba(0,0,0,.45);user-select:text;font-variant-numeric:tabular-nums;
+  backdrop-filter:blur(10px)}
+.ts-chip .ts-k{opacity:.6;margin-right:3px}
+.ts-chip .ts-v{font-weight:700}
+.ts-chip .ts-live{color:#7aa5ff}
 .ts-chip .ts-off{color:var(--ts-dim);font-weight:400}
-.ts-chip.ts-offline{opacity:.7}
-.ts-chip .ts-x{all:unset;cursor:pointer;opacity:.45;padding:0 2px;margin-left:2px;font-size:11px}
+.ts-chip.ts-offline{opacity:.75}
+.ts-chip .ts-x{all:unset;cursor:pointer;opacity:.55;padding:0 2px;margin-left:2px;font-size:12px}
 .ts-chip .ts-x:hover{opacity:1}
 `;
 
@@ -229,6 +229,14 @@
 
   function boot() {
     console.info("[turn-stats] runtime loaded (chip mode)");
+    // v0.5.0 重写时弄丢了样式注入：CSS 常量从未进文档，悬浮条以裸 div 布局，
+    // 被页面顶栏遮住——肉眼"永远看不到"。样式只挂一次
+    if (!document.getElementById("turn-stats-style")) {
+      const style = document.createElement("style");
+      style.id = "turn-stats-style";
+      style.textContent = CSS;
+      document.head.appendChild(style);
+    }
     setInterval(tick, POLL_MS);
     addEventListener("focus", tick);
     addEventListener("online", tick);
