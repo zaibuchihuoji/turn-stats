@@ -49,7 +49,7 @@ https://github.com/zaibuchihuoji/turn-stats
 github.com 直连超时的话填 codeload 直链（固定版本）：
 
 ```
-https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.9
+https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.7.0
 ```
 
 装完**重启 Kimi Code Desktop** + 开新会话生效。
@@ -61,6 +61,22 @@ https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.9
 （瞬时网络故障不会压制一整天）；带目录锁，多窗口同时开会话不会互相踩交换过程。
 开发副本（含 `.git`）不自更新；`--check-update` 立即检查；`--no-update` 或
 `TURN_STATS_NO_UPDATE=1` 关闭。
+
+## 真机验证闭环（开发者）
+
+改渲染相关代码后跑一条命令完成确定性验证，不再靠"重启几次碰运气"：
+
+```bash
+node scripts/verify.mjs
+```
+
+它会：注入最新副本 → 强制重启 Kimi Code（带 `--remote-debugging-port=9226`，
+对话在服务端不丢）→ CDP 断言 9 项：脚本已加载且为最新注入版、样式已注入、
+悬浮条已挂载且在视口内、数据链路正常、配色生效、两侧对齐（宽度跟随输入框）、
+不遮挡输入框。任何一项失败退出码非 0。
+
+渲染脚本还有**新版待生效提示**：hook 注入新版本后，旧页面上的悬浮条会显示
+"⟳ 新版待生效"，点击即刷新页面完成升级——不再需要猜"要重启几次"。
 
 ## 手动管理
 

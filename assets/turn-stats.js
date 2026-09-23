@@ -22,6 +22,12 @@
   const POLL_MS = 1500;
   const FETCH_TIMEOUT = 6000;
   const HIDE_KEY = "turn-stats.hidden";
+  // 当前运行脚本的版本（来自注入标签的 ?v=）：与 sidecar 上报的磁盘版本不一致
+  // 说明 hook 已注入新版而页面还没重载 → 悬浮条提示"待生效"，点击即刷新
+  const RUNNING_VERSION = (() => {
+    try { return /v=([^&"]+)/.exec(document.currentScript?.src ?? "")?.[1] ?? ""; }
+    catch { return ""; }
+  })();
 
   // -------------------------------------------------------------------------
   // sidecar 客户端
@@ -31,7 +37,9 @@
   async function apiClient(force) {
     if (!force && client.port && Date.now() - client.at < 5000) return client;
     try {
-      const j = await (await fetch(`${CONFIG_URL}?t=${Date.now()}`)).json();
+      // 必须带超时：启动初期 sidecar 可能还没写好 config，无超时的 fetch
+      // 会挂死首次 tick，ticking 守卫随之永久卡住 → 轮询彻底停摆
+      const j = await (await fetch(`${CONFIG_URL}?t=${Date.now()}`, { signal: AbortSignal.timeout(3000) })).json();
       client = { at: Date.now(), port: j?.port ?? 0, token: j?.token ?? "" };
     } catch { client = { at: Date.now(), port: 0, token: "" }; }
     return client;
@@ -86,6 +94,9 @@
 .ts-chip .ts-live{color:var(--ts-live)}
 .ts-chip .ts-off{color:var(--ts-dim);font-weight:400}
 .ts-chip.ts-offline{opacity:.75}
+.ts-chip .ts-update{all:unset;cursor:pointer;color:var(--ts-live);font-weight:600;
+  margin-left:4px;white-space:nowrap}
+.ts-chip .ts-update:hover{text-decoration:underline}
 .ts-chip .ts-x{all:unset;cursor:pointer;opacity:.55;padding:0 2px;margin-left:2px;font-size:12px}
 .ts-chip .ts-x:hover{opacity:1}
 `;
@@ -257,23 +268,47 @@
   const diag = { bootAt: Date.now(), sidecar: "?", polled: 0, lastError: "", offline: false, chip: false };
   let lastGood = null;   // 最后一次成功的 /state：离线时保留旧数据，不把悬浮条删成空白
 
+  // 磁盘已注入更新版本而页面还没重载 → 悬浮条上挂"⟳ 新版待生效"，点击即刷新
+  function markUpdatePending(state) {
+    if (!RUNNING_VERSION || !state?.version || state.version === RUNNING_VERSION) return;
+    const chip = document.getElementById("turn-stats-chip");
+    if (!chip || chip.querySelector(".ts-update")) return;
+    const b = document.createElement("button");
+    b.className = "ts-update";
+    b.textContent = "⟳ 新版待生效";
+    b.title = `运行中 v${RUNNING_VERSION}，已注入 v${state.version}。点击刷新页面立即生效`;
+    b.addEventListener("click", () => location.reload());
+    chip.appendChild(b);
+  }
+
+  let ticking = false;
+  let lastRun = Date.now();
   async function tick() {
+    if (ticking) return;
+    ticking = true;
     try {
-      const state = await callState();
-      lastGood = state;
-      diag.offline = false;
-      diag.lastError = "";
-      renderChip(state, false);
-      diag.sidecar = `v${state.version}`;
-    } catch (e) {
-      diag.lastError = String(e?.message ?? e);
-      diag.offline = true;
-      renderChip(lastGood, true);
+      try {
+        const state = await callState();
+        lastGood = state;
+        diag.offline = false;
+        diag.lastError = "";
+        renderChip(state, false);
+        markUpdatePending(state);
+        diag.sidecar = `v${state.version}`;
+      } catch (e) {
+        diag.lastError = String(e?.message ?? e);
+        diag.offline = true;
+        renderChip(lastGood, true);
+        markUpdatePending(lastGood);
+      }
+      diag.polled++;
+      diag.chip = !!document.getElementById("turn-stats-chip");
+      positionChip();
+      lastRun = Date.now();
+      try { window.__turnStatsState = { ...diag }; } catch {}
+    } finally {
+      ticking = false;   // 无论上方发生什么，守卫必须释放，否则轮询永久停摆
     }
-    diag.polled++;
-    diag.chip = !!document.getElementById("turn-stats-chip");
-    positionChip();
-    try { window.__turnStatsState = { ...diag }; } catch {}
   }
 
   function boot() {
@@ -287,8 +322,12 @@
       document.head.appendChild(style);
     }
     setInterval(tick, POLL_MS);
+    // 窗口被遮挡时 Chromium 把 setInterval 节流到 ~1 次/分钟，悬浮条会停留在
+    // 旧位置/旧数据。除定时器外，凡是用户"看回来"的时机立即补一次拉取：
     addEventListener("focus", tick);
     addEventListener("online", tick);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+    document.addEventListener("mousemove", () => { if (Date.now() - lastRun > 2000) tick(); });
     tick();
   }
 
