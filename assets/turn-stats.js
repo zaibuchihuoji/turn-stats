@@ -141,14 +141,31 @@
     return cands.reduce((a, b) => (b.top > a.top ? b : a));
   }
 
+  // 输入框可视容器（圆角描边那层）的上边缘：从编辑器向上找第一个带明显
+  // 上内边距/边框的祖先；限制在编辑器上方 80px 内，防止一路爬到外层面板
+  function composerTopEdge(el) {
+    const base = el.getBoundingClientRect().top;
+    let n = el.parentElement;
+    for (let i = 0; n && n !== document.body && i < 5; i++) {
+      const cs = getComputedStyle(n);
+      const thick = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0);
+      const top = n.getBoundingClientRect().top;
+      if (thick >= 12 && top >= base - 4 && base - top <= 80) return top;
+      n = n.parentElement;
+    }
+    return base;
+  }
+
   function positionChip() {
     const chip = document.getElementById("turn-stats-chip");
     if (!chip) return;
     const r = findComposerRect();
     if (r) {
+      const composer = document.querySelector('.ProseMirror, [contenteditable=true], textarea, [aria-label*="输入"]');
+      const topEdge = composer ? composerTopEdge(composer) : r.top;
       chip.style.left = Math.round(r.left) + "px";
       chip.style.right = Math.max(12, Math.round(window.innerWidth - r.right)) + "px";
-      chip.style.top = Math.max(8, Math.round(r.top - chip.offsetHeight - 6)) + "px";
+      chip.style.top = Math.max(8, Math.round(topEdge - chip.offsetHeight - 2)) + "px";
       return;
     }
     chip.style.left = "";
