@@ -68,21 +68,22 @@
   // 渲染
   // -------------------------------------------------------------------------
   const CSS = `
-.ts-scope{--ts-fg:#e8eaf2;--ts-dim:rgba(232,234,242,.6);--ts-border:rgba(96,140,255,.5);
-  --ts-bg:rgba(20,22,30,.97);--ts-card:rgba(255,255,255,.08)}
-.ts-scope.light{--ts-fg:#26282f;--ts-dim:rgba(38,40,47,.6);--ts-border:rgba(47,84,235,.45);
-  --ts-bg:rgba(255,255,255,.98);--ts-card:rgba(0,0,0,.05)}
+/* 配色镜像 Kimi Code 自身设计令牌（--ms-*，深浅色各一套），观感与应用原生浮层一致 */
+.ts-scope{--ts-fg:hsl(0 0% 93%);--ts-dim:hsl(0 0% 60%);--ts-border:hsl(0 0% 20%);
+  --ts-bg:hsl(0 0% 12% / .97);--ts-live:hsl(215 55% 62%)}
+.ts-scope.light{--ts-fg:hsl(0 0% 10%);--ts-dim:hsl(0 0% 43%);--ts-border:hsl(0 0% 87%);
+  --ts-bg:hsl(0 0% 100% / .98);--ts-live:hsl(215 60% 50%)}
 @media (prefers-color-scheme: light){.ts-scope:not(.dark):not(.light){
-  --ts-fg:#26282f;--ts-dim:rgba(38,40,47,.6);--ts-border:rgba(47,84,235,.45);
-  --ts-bg:rgba(255,255,255,.98);--ts-card:rgba(0,0,0,.05)}}
+  --ts-fg:hsl(0 0% 10%);--ts-dim:hsl(0 0% 43%);--ts-border:hsl(0 0% 87%);
+  --ts-bg:hsl(0 0% 100% / .98);--ts-live:hsl(215 60% 50%)}}
 .ts-chip{position:fixed;right:18px;top:38%;z-index:2147483000;display:flex;gap:4px 10px;
-  align-items:baseline;padding:7px 13px;border-radius:10px;border:1px solid var(--ts-border);
+  align-items:baseline;padding:7px 13px;border-radius:8px;border:1px solid var(--ts-border);
   background:var(--ts-bg);color:var(--ts-fg);font-size:12px;line-height:1.5;
-  box-shadow:0 6px 24px rgba(0,0,0,.45);user-select:text;font-variant-numeric:tabular-nums;
-  backdrop-filter:blur(10px)}
+  box-shadow:0 4px 6px -1px hsl(0 0% 0% / .2),0 2px 4px -2px hsl(0 0% 0% / .15);
+  user-select:text;font-variant-numeric:tabular-nums;backdrop-filter:blur(10px)}
 .ts-chip .ts-k{opacity:.6;margin-right:3px}
-.ts-chip .ts-v{font-weight:700}
-.ts-chip .ts-live{color:#7aa5ff}
+.ts-chip .ts-v{font-weight:600}
+.ts-chip .ts-live{color:var(--ts-live)}
 .ts-chip .ts-off{color:var(--ts-dim);font-weight:400}
 .ts-chip.ts-offline{opacity:.75}
 .ts-chip .ts-x{all:unset;cursor:pointer;opacity:.55;padding:0 2px;margin-left:2px;font-size:12px}

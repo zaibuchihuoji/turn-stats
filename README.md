@@ -49,7 +49,7 @@ https://github.com/zaibuchihuoji/turn-stats
 github.com 直连超时的话填 codeload 直链（固定版本）：
 
 ```
-https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.6
+https://codeload.github.com/zaibuchihuoji/turn-stats/zip/refs/tags/v0.6.7
 ```
 
 装完**重启 Kimi Code Desktop** + 开新会话生效。
