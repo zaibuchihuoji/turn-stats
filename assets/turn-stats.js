@@ -142,18 +142,19 @@
   }
 
   // 输入框可视容器（圆角描边那层）的上边缘：从编辑器向上找第一个带明显
-  // 上内边距/边框的祖先；限制在编辑器上方 80px 内，防止一路爬到外层面板
+  // 圆角或上内边距/边框的祖先；限 80px 内防止爬到外层面板。找不到返回 null
   function composerTopEdge(el) {
     const base = el.getBoundingClientRect().top;
     let n = el.parentElement;
     for (let i = 0; n && n !== document.body && i < 5; i++) {
       const cs = getComputedStyle(n);
+      const radius = parseFloat(cs.borderTopLeftRadius) || 0;
       const thick = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.borderTopWidth) || 0);
       const top = n.getBoundingClientRect().top;
-      if (thick >= 12 && top >= base - 4 && base - top <= 80) return top;
+      if ((radius >= 8 || thick >= 12) && top >= base - 4 && base - top <= 80) return top;
       n = n.parentElement;
     }
-    return base;
+    return null;
   }
 
   function positionChip() {
@@ -162,10 +163,13 @@
     const r = findComposerRect();
     if (r) {
       const composer = document.querySelector('.ProseMirror, [contenteditable=true], textarea, [aria-label*="输入"]');
-      const topEdge = composer ? composerTopEdge(composer) : r.top;
+      const edge = composer ? composerTopEdge(composer) : null;
+      // 找到容器边缘→紧贴（2px）；没找到→退离编辑器顶 24px，宁可浮空也不遮挡
+      const anchorTop = edge ?? r.top;
+      const gap = edge !== null ? 2 : 24;
       chip.style.left = Math.round(r.left) + "px";
       chip.style.right = Math.max(12, Math.round(window.innerWidth - r.right)) + "px";
-      chip.style.top = Math.max(8, Math.round(topEdge - chip.offsetHeight - 2)) + "px";
+      chip.style.top = Math.max(8, Math.round(anchorTop - chip.offsetHeight - gap)) + "px";
       return;
     }
     chip.style.left = "";
